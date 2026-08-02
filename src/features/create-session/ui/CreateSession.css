@@ -1,0 +1,28 @@
+.action-card {
+  background: #201d36;
+  border: 1px solid #393451;
+  border-radius: 18px;
+  display: flex;
+  flex: 1 1 300px;
+  flex-direction: column;
+  gap: 14px;
+  padding: 28px;
+}
+.action-card__icon { align-items: center; background: #322c57; border-radius: 12px; color: #b7a5ff; display: flex; font-size: 24px; height: 44px; justify-content: center; width: 44px; }
+.action-card h2 { color: #fff; font-size: 20px; margin: 4px 0 0; }
+.action-card p { color: #aba5c4; line-height: 1.5; margin: 0 0 5px; min-height: 48px; }
+.file-name { color: #77718e; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name--selected { color: #cfc9e7; }
+.file-selection-error { color: #f0aebf; font-size: 12px; line-height: 1.35; }
+.saved-playlists { border-top: 1px solid #393451; display: grid; gap: 7px; margin-top: 4px; padding-top: 14px; }
+.saved-playlists > span { color: #8f88a7; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.saved-session { display: grid; gap: 6px; grid-template-columns: minmax(0, 1fr) 34px; }
+.saved-playlist { background: #292540; border: 1px solid #403a59; border-radius: 9px; color: #eeeaff; cursor: pointer; display: grid; gap: 3px; min-width: 0; padding: 9px 11px; text-align: left; }
+.saved-playlist:hover:not(:disabled) { background: #312b4d; border-color: #5c507d; }
+.saved-playlist:disabled { cursor: default; opacity: .5; }
+.saved-playlist strong { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-playlist small { color: #9189aa; font-size: 10px; }
+.saved-session__delete { background: transparent; border: 1px solid transparent; border-radius: 8px; color: #817990; cursor: pointer; font-size: 18px; padding: 0; }
+.saved-session__delete:hover:not(:disabled) { background: rgba(215, 100, 133, .1); border-color: rgba(215, 100, 133, .25); color: #e6a0b5; }
+.saved-session__delete:disabled { cursor: default; opacity: .4; }
+.visually-hidden { height: 1px; opacity: 0; overflow: hidden; position: absolute; width: 1px; }
