@@ -34,6 +34,8 @@ Only the host may update the playlist. Local file paths are never transmitted: e
 
 The host registers the item-id-to-path mapping through a local Tauri command rather than through WebSocket. The HTTP endpoint checks that the room is active, the item belongs to its current playlist, and the bearer token matches. It supports one `bytes` range per request, including open-ended and suffix ranges; multipart ranges are rejected with `416 Range Not Satisfiable`.
 
+Media responses share a room-level adaptive bandwidth budget. Its lower working bound is derived from file size, known duration, and the number of viewers, with extra headroom for container overhead and bitrate peaks. This keeps Range requests made after seeking from being throttled below the rate required for continuous playback while retaining RTT-based congestion protection.
+
 ## Local room discovery
 
 Room discovery is a separate UDP protocol on port `45892`. A viewer sends a versioned JSON query to every active IPv4 adapter using its directed broadcast address, limited broadcast and multicast group `239.255.77.77`. The query may contain a room code; without one, every active room is returned for the browser.

@@ -435,12 +435,12 @@ mod windows_player {
             instance.set_option("idle", "yes")?;
             instance.set_option("hwdec", "auto-safe")?;
             instance.set_option("cache", "auto")?;
-            instance.set_option("cache-secs", "20")?;
-            instance.set_option("demuxer-max-bytes", "64MiB")?;
-            instance.set_option("demuxer-max-back-bytes", "12MiB")?;
-            instance.set_option("demuxer-hysteresis-secs", "5")?;
+            instance.set_option("cache-secs", "60")?;
+            instance.set_option("demuxer-max-bytes", "256MiB")?;
+            instance.set_option("demuxer-max-back-bytes", "32MiB")?;
+            instance.set_option("demuxer-hysteresis-secs", "10")?;
             instance.set_option("cache-pause", "yes")?;
-            instance.set_option("cache-pause-wait", "2")?;
+            instance.set_option("cache-pause-wait", "3")?;
             instance.api.check(
                 unsafe { (instance.api.initialize)(instance.handle) },
                 "инициализация",

@@ -101,10 +101,19 @@ struct Participant {
     minimum_ping_ms: Option<u64>,
 }
 
-const MIN_MEDIA_RATE: u64 = 1_572_864;
-const INITIAL_MEDIA_RATE: u64 = 4_194_304;
-const MAX_MEDIA_RATE: u64 = 16_777_216;
+const MIN_MEDIA_RATE: u64 = 2_097_152;
+const INITIAL_MEDIA_RATE: u64 = 8_388_608;
+const MAX_MEDIA_RATE: u64 = 67_108_864;
+const UNKNOWN_MEDIA_RATE_PER_VIEWER: u64 = 8_388_608;
+const MEDIA_RATE_SAFETY_NUMERATOR: u64 = 3;
+const MEDIA_RATE_SAFETY_DENOMINATOR: u64 = 2;
 const MEDIA_CHUNK_SIZE: usize = 64 * 1024;
+
+struct MediaTransferProfile {
+    bandwidth: Arc<BandwidthGovernor>,
+    duration_seconds: f64,
+    viewer_count: usize,
+}
 
 struct BandwidthGovernor {
     bytes_per_second: AtomicU64,
@@ -119,8 +128,12 @@ impl BandwidthGovernor {
         }
     }
 
-    async fn pace(&self, bytes: usize) {
-        let rate = self.bytes_per_second.load(Ordering::Relaxed).max(1);
+    async fn pace(&self, bytes: usize, required_rate: u64) {
+        let rate = self
+            .bytes_per_second
+            .load(Ordering::Relaxed)
+            .max(required_rate)
+            .clamp(MIN_MEDIA_RATE, MAX_MEDIA_RATE);
         let spacing = Duration::from_secs_f64(bytes as f64 / rate as f64);
         let scheduled = {
             let mut next = self.next_send.lock().await;
@@ -156,6 +169,21 @@ fn adjusted_media_rate(current: u64, ping_ms: u64, minimum_ping_ms: u64) -> u64 
         current
     };
     adjusted.clamp(MIN_MEDIA_RATE, MAX_MEDIA_RATE)
+}
+
+fn required_media_rate(file_size: u64, duration_seconds: f64, viewer_count: usize) -> u64 {
+    let viewers = viewer_count.max(1) as u64;
+    let per_viewer = if duration_seconds.is_finite() && duration_seconds > 0.0 {
+        let average_rate = (file_size as f64 / duration_seconds).ceil() as u64;
+        average_rate
+            .saturating_mul(MEDIA_RATE_SAFETY_NUMERATOR)
+            .div_ceil(MEDIA_RATE_SAFETY_DENOMINATOR)
+    } else {
+        UNKNOWN_MEDIA_RATE_PER_VIEWER
+    };
+    per_viewer
+        .saturating_mul(viewers)
+        .clamp(MIN_MEDIA_RATE, MAX_MEDIA_RATE)
 }
 
 impl Room {
@@ -415,15 +443,18 @@ async fn stream_media(
     headers: HeaderMap,
 ) -> Response {
     let room_code = room_code.trim().to_uppercase();
-    let bandwidth = {
+    let transfer = {
         let rooms = state.rooms.read().await;
         rooms.get(&room_code).and_then(|room| {
-            (room.media_access_token == query.token
-                && room.playlist.iter().any(|item| item.id == item_id))
-            .then(|| room.bandwidth.clone())
+            let item = room.playlist.iter().find(|item| item.id == item_id)?;
+            (room.media_access_token == query.token).then(|| MediaTransferProfile {
+                bandwidth: room.bandwidth.clone(),
+                duration_seconds: item.duration_seconds,
+                viewer_count: room.participants.len().saturating_sub(1),
+            })
         })
     };
-    let Some(bandwidth) = bandwidth else {
+    let Some(transfer) = transfer else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
@@ -439,7 +470,7 @@ async fn stream_media(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    stream_file(path, headers, Some(bandwidth)).await
+    stream_file(path, headers, Some(transfer)).await
 }
 
 async fn stream_subtitle(
@@ -487,7 +518,7 @@ async fn stream_subtitle(
 async fn stream_file(
     path: PathBuf,
     headers: HeaderMap,
-    bandwidth: Option<Arc<BandwidthGovernor>>,
+    transfer: Option<MediaTransferProfile>,
 ) -> Response {
     let Ok(mut file) = tokio::fs::File::open(&path).await else {
         return StatusCode::NOT_FOUND.into_response();
@@ -496,6 +527,10 @@ async fn stream_file(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let size = metadata.len();
+    let required_rate = transfer.as_ref().map_or(MIN_MEDIA_RATE, |profile| {
+        required_media_rate(size, profile.duration_seconds, profile.viewer_count)
+    });
+    let bandwidth = transfer.map(|profile| profile.bandwidth);
     let requested_range = match headers.get(header::RANGE) {
         Some(value) => match value
             .to_str()
@@ -520,7 +555,7 @@ async fn stream_file(
             let bandwidth = bandwidth.clone();
             async move {
                 if let (Ok(bytes), Some(governor)) = (&chunk, bandwidth) {
-                    governor.pace(bytes.len()).await;
+                    governor.pace(bytes.len(), required_rate).await;
                 }
                 chunk
             }
@@ -939,17 +974,31 @@ async fn handle_client_message(
             let mut rooms = state.rooms.write().await;
             let room = rooms.get_mut(connected_room_code)?;
             let is_viewer = room.host_participant_id != connected_participant_id;
-            let participant = room.participants.get_mut(connected_participant_id)?;
             let ping_ms = payload.ping_ms.min(60_000);
-            participant.ping_ms = Some(ping_ms);
-            participant.minimum_ping_ms = Some(
-                participant
-                    .minimum_ping_ms
-                    .map_or(ping_ms, |minimum| minimum.min(ping_ms)),
-            );
+            {
+                let participant = room.participants.get_mut(connected_participant_id)?;
+                participant.ping_ms = Some(ping_ms);
+                participant.minimum_ping_ms = Some(
+                    participant
+                        .minimum_ping_ms
+                        .map_or(ping_ms, |minimum| minimum.min(ping_ms)),
+                );
+            }
             if is_viewer {
+                let (worst_ping, worst_queue_delay) = room
+                    .participants
+                    .iter()
+                    .filter(|(participant_id, _)| *participant_id != &room.host_participant_id)
+                    .filter_map(|(_, participant)| {
+                        let ping = participant.ping_ms?;
+                        let minimum = participant.minimum_ping_ms.unwrap_or(ping);
+                        Some((ping, ping.saturating_sub(minimum)))
+                    })
+                    .fold((0, 0), |(worst_ping, worst_queue), (ping, queue)| {
+                        (worst_ping.max(ping), worst_queue.max(queue))
+                    });
                 room.bandwidth
-                    .report_ping(ping_ms, participant.minimum_ping_ms.unwrap_or(ping_ms));
+                    .report_ping(worst_ping, worst_ping.saturating_sub(worst_queue_delay));
             }
             let message = ServerMessage::ParticipantList {
                 room_code: connected_room_code.to_owned(),
@@ -1227,6 +1276,19 @@ mod tests {
 
         assert_eq!(adjusted_media_rate(MIN_MEDIA_RATE, 500, 20), MIN_MEDIA_RATE);
         assert_eq!(adjusted_media_rate(MAX_MEDIA_RATE, 20, 20), MAX_MEDIA_RATE);
+    }
+
+    #[test]
+    fn media_rate_floor_covers_average_bitrate_and_all_viewers() {
+        let ten_megabytes_per_second = 10 * 1024 * 1024;
+        let file_size = ten_megabytes_per_second * 7_200;
+
+        assert_eq!(required_media_rate(file_size, 7_200.0, 1), 15 * 1024 * 1024);
+        assert_eq!(required_media_rate(file_size, 7_200.0, 2), 30 * 1024 * 1024);
+        assert_eq!(
+            required_media_rate(file_size, 0.0, 1),
+            UNKNOWN_MEDIA_RATE_PER_VIEWER
+        );
     }
 
     #[tokio::test]
