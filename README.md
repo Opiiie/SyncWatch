@@ -55,6 +55,12 @@ Windows Firewall must allow SyncWatch to receive local UDP and TCP connections. 
 
 Debug builds accept `--allow-multiple-instances`, while normal builds remain single-instance. Start two copies of `src-tauri/target/debug/syncwatch.exe` with that flag, create a room in the first one, and use either code lookup or the room browser in the second one. Loopback discovery is enabled specifically for this test. This verifies two independent WebSocket clients, HTTP Range streaming and playback through a second libmpv instance, but does not verify Windows Firewall or real LAN/VPN routing.
 
+## Updates and releases
+
+Packaged builds check the latest GitHub Release shortly after startup. When an update is available, the user can download and install it from a small in-app notice. Installation is disabled while the user is connected to a room so playback is never interrupted unexpectedly. Update bundles are signed with the Tauri updater key and installed in passive mode on Windows.
+
+`libmpv-2.dll` is not stored in Git. Local developers and the Windows release workflow restore the pinned DLL from the `runtime-v1` GitHub prerelease by running `scripts/fetch-libmpv.ps1`; the script rejects a download whose SHA-256 checksum does not match. See `RELEASING.md` for the release procedure.
+
 ## Playlist
 
 A host can create an empty room, add several videos later, remove and reorder them, or select another item without recreating the session. Playlist metadata, per-item progress and the active item are synchronized through the room; absolute local paths remain on the host computer. Selecting an item resumes its saved position, and reaching the end selects the next item automatically when one exists.

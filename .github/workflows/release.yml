@@ -1,0 +1,52 @@
+name: Выпуск SyncWatch
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@v4
+
+      - name: Подготовить Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Подготовить pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Подготовить Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Установить зависимости
+        run: pnpm install --frozen-lockfile
+
+      - name: Получить libmpv
+        shell: pwsh
+        run: ./scripts/fetch-libmpv.ps1
+
+      - name: Собрать и опубликовать обновление
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "SyncWatch v__VERSION__"
+          releaseBody: "Новая версия SyncWatch. Подробности изменений указаны в истории проекта."
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          updaterJsonPreferNsis: true

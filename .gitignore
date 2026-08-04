@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Downloaded separately for local and release builds.
+src-tauri/resources/libmpv-2.dll
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

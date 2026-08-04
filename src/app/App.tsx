@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { useSessionController } from "../entities/session/model/useSessionController";
+import { AppUpdateNotice } from "../features/app-update/ui/AppUpdateNotice";
 import { HomePage } from "../pages/home/ui/HomePage";
 import { SessionOverview } from "../widgets/session-overview/ui/SessionOverview";
 
@@ -91,6 +92,7 @@ export function App() {
   return (
     <>
       {page}
+      <AppUpdateNotice sessionActive={Boolean(controller.session)} />
       {contextMenu && (
         <div
           className="app-context-menu"
