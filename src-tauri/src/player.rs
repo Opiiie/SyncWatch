@@ -27,6 +27,17 @@ impl PlayerBounds {
             .clamp(top, self.height.max(0));
         (right > left && bottom > top).then_some((left, top, right, bottom))
     }
+
+    fn visible_backdrop_clip(self, guard: i32) -> Option<(i32, i32, i32, i32)> {
+        let (left, top, right, bottom) = self.visible_clip()?;
+        let guard = guard.max(0);
+        Some((
+            left + guard - i32::from(left == 0) * guard,
+            top + guard - i32::from(top == 0) * guard,
+            right + guard + i32::from(right == self.width.max(0)) * guard,
+            bottom + guard + i32::from(bottom == self.height.max(0)) * guard,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -63,6 +74,22 @@ mod bounds_tests {
         };
 
         assert_eq!(bounds.visible_clip(), None);
+    }
+
+    #[test]
+    fn backdrop_covers_visible_edges_but_not_a_scrolled_boundary() {
+        let bounds = PlayerBounds {
+            x: 10,
+            y: -100,
+            width: 800,
+            height: 450,
+            clip_x: 0,
+            clip_y: 100,
+            clip_width: 800,
+            clip_height: 350,
+        };
+
+        assert_eq!(bounds.visible_backdrop_clip(2), Some((0, 102, 804, 454)));
     }
 }
 
@@ -637,15 +664,43 @@ mod windows_player {
 
     struct NativeSurface {
         window: HWND,
+        backdrop: HWND,
         host: HWND,
     }
 
     unsafe impl Send for NativeSurface {}
 
     impl NativeSurface {
+        const SEAM_GUARD: i32 = 2;
+
         fn create(host: HWND, bounds: PlayerBounds) -> Result<Self, String> {
             let class_name = "STATIC\0".encode_utf16().collect::<Vec<_>>();
             let title = "SyncWatch video\0".encode_utf16().collect::<Vec<_>>();
+            let backdrop_title = "SyncWatch video backdrop\0"
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            let backdrop = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                    class_name.as_ptr(),
+                    backdrop_title.as_ptr(),
+                    WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | 4,
+                    0,
+                    0,
+                    bounds.width.max(1) + Self::SEAM_GUARD * 2,
+                    bounds.height.max(1) + Self::SEAM_GUARD * 2,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            };
+            if backdrop.is_null() {
+                return Err(format!(
+                    "Не удалось создать фон области видео: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
             let window = unsafe {
                 CreateWindowExW(
                     WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
@@ -663,23 +718,34 @@ mod windows_player {
                 )
             };
             if window.is_null() {
+                unsafe { DestroyWindow(backdrop) };
                 return Err(format!(
                     "Не удалось создать область видео: {}",
                     std::io::Error::last_os_error()
                 ));
             }
-            let surface = Self { window, host };
+            let surface = Self {
+                window,
+                backdrop,
+                host,
+            };
             surface.set_bounds(bounds)?;
             Ok(surface)
         }
 
         fn set_bounds(&self, bounds: PlayerBounds) -> Result<(), String> {
             let Some((clip_left, clip_top, clip_right, clip_bottom)) = bounds.visible_clip() else {
-                unsafe { ShowWindow(self.window, SW_HIDE) };
+                unsafe {
+                    ShowWindow(self.window, SW_HIDE);
+                    ShowWindow(self.backdrop, SW_HIDE);
+                }
                 return Ok(());
             };
             if unsafe { IsIconic(self.host) } != 0 {
-                unsafe { ShowWindow(self.window, SW_HIDE) };
+                unsafe {
+                    ShowWindow(self.window, SW_HIDE);
+                    ShowWindow(self.backdrop, SW_HIDE);
+                }
                 return Ok(());
             }
 
@@ -690,6 +756,24 @@ mod windows_player {
             if unsafe { ClientToScreen(self.host, &mut origin) } == 0 {
                 return Err(format!(
                     "Не удалось определить положение области видео: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let guard = Self::SEAM_GUARD;
+            let backdrop_result = unsafe {
+                SetWindowPos(
+                    self.backdrop,
+                    self.host,
+                    origin.x - guard,
+                    origin.y - guard,
+                    bounds.width.max(1) + guard * 2,
+                    bounds.height.max(1) + guard * 2,
+                    SWP_NOACTIVATE,
+                )
+            };
+            if backdrop_result == 0 {
+                return Err(format!(
+                    "Не удалось изменить размер фона видео: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -711,28 +795,64 @@ mod windows_player {
                 ));
             }
 
-            let region = unsafe { CreateRectRgn(clip_left, clip_top, clip_right, clip_bottom) };
+            let (backdrop_left, backdrop_top, backdrop_right, backdrop_bottom) = bounds
+                .visible_backdrop_clip(guard)
+                .expect("visible player bounds must have a backdrop clip");
+            Self::apply_region(
+                self.backdrop,
+                backdrop_left,
+                backdrop_top,
+                backdrop_right,
+                backdrop_bottom,
+                "фона видео",
+            )?;
+            Self::apply_region(
+                self.window,
+                clip_left,
+                clip_top,
+                clip_right,
+                clip_bottom,
+                "области видео",
+            )?;
+            unsafe {
+                ShowWindow(self.backdrop, SW_SHOWNOACTIVATE);
+                ShowWindow(self.window, SW_SHOWNOACTIVATE);
+            }
+            Ok(())
+        }
+
+        fn apply_region(
+            window: HWND,
+            left: i32,
+            top: i32,
+            right: i32,
+            bottom: i32,
+            target: &str,
+        ) -> Result<(), String> {
+            let region = unsafe { CreateRectRgn(left, top, right, bottom) };
             if region.is_null() {
                 return Err(format!(
-                    "Не удалось ограничить область видео: {}",
+                    "Не удалось ограничить {target}: {}",
                     std::io::Error::last_os_error()
                 ));
             }
-            if unsafe { SetWindowRgn(self.window, region, 1) } == 0 {
+            if unsafe { SetWindowRgn(window, region, 1) } == 0 {
                 unsafe { DeleteObject(region) };
                 return Err(format!(
-                    "Не удалось применить границы области видео: {}",
+                    "Не удалось применить границы {target}: {}",
                     std::io::Error::last_os_error()
                 ));
             }
-            unsafe { ShowWindow(self.window, SW_SHOWNOACTIVATE) };
             Ok(())
         }
     }
 
     impl Drop for NativeSurface {
         fn drop(&mut self) {
-            unsafe { DestroyWindow(self.window) };
+            unsafe {
+                DestroyWindow(self.window);
+                DestroyWindow(self.backdrop);
+            }
         }
     }
 

@@ -3634,7 +3634,7 @@ dependencies = [
 
 [[package]]
 name = "syncwatch"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "futures-util",

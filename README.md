@@ -33,6 +33,8 @@ When the DLL is unavailable or incompatible, the player surface displays a diagn
 
 The controls fade out after two seconds without pointer or keyboard activity and immediately when the pointer leaves the player.
 
+The native video surface keeps the exact player dimensions. A separate clipped black backdrop sits underneath it to cover Windows/DPI composition seams without stretching or cropping the video, and both native surfaces are hidden or clipped when the player scrolls outside the application viewport.
+
 ## Network playback
 
 The host registers local media paths directly with the Rust server; these paths are never included in WebSocket messages. After joining, a viewer receives a random room media token and opens the active item in libmpv through `GET /media/{roomCode}/{itemId}?token=...` on the same automatically selected port as the WebSocket server.
