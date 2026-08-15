@@ -32,10 +32,6 @@ jobs:
       - name: Установить зависимости
         run: pnpm install --frozen-lockfile
 
-      - name: Получить libmpv
-        shell: pwsh
-        run: ./scripts/fetch-libmpv.ps1
-
       - name: Собрать и опубликовать обновление
         uses: tauri-apps/tauri-action@v1
         env:

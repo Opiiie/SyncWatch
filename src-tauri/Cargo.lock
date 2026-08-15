@@ -3634,13 +3634,16 @@ dependencies = [
 
 [[package]]
 name = "syncwatch"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "axum",
  "futures-util",
  "libloading 0.8.9",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

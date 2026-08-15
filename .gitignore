@@ -12,7 +12,7 @@ dist
 dist-ssr
 *.local
 
-# Downloaded separately for local and release builds.
+# Optional local-development runtime; application releases download it on demand.
 src-tauri/resources/libmpv-2.dll
 
 # Editor directories and files

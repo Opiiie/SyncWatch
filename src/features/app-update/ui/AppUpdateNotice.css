@@ -4,16 +4,13 @@
   background: rgba(28, 24, 44, .94);
   border: 1px solid rgba(126, 108, 177, .55);
   border-radius: 14px;
-  bottom: 18px;
   box-shadow: 0 18px 48px rgba(0, 0, 0, .38);
   display: grid;
   gap: 12px;
   grid-template-columns: auto minmax(220px, 1fr) auto auto;
   max-width: min(620px, calc(100vw - 36px));
   padding: 12px;
-  position: fixed;
-  right: 18px;
-  z-index: 950;
+  position: relative;
 }
 
 .app-update__mark {
@@ -30,7 +27,7 @@
 
 .app-update__content { display: grid; gap: 4px; min-width: 0; }
 .app-update__content strong { color: #f5f3ff; font-size: 14px; }
-.app-update__content span { color: #aaa3c0; font-size: 12px; line-height: 1.35; }
+.app-update__content span { color: #aaa3c0; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
 
 .app-update > button:not(.app-update__dismiss) {
   background: #7053e8;

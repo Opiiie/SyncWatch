@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { useSessionController } from "../entities/session/model/useSessionController";
 import { AppUpdateNotice } from "../features/app-update/ui/AppUpdateNotice";
+import { MpvRuntimeNotice } from "../features/mpv-runtime/ui/MpvRuntimeNotice";
 import { HomePage } from "../pages/home/ui/HomePage";
 import { SessionOverview } from "../widgets/session-overview/ui/SessionOverview";
 
@@ -92,7 +93,10 @@ export function App() {
   return (
     <>
       {page}
-      <AppUpdateNotice sessionActive={Boolean(controller.session)} />
+      <div className="app-notice-stack">
+        <MpvRuntimeNotice />
+        <AppUpdateNotice sessionActive={Boolean(controller.session)} />
+      </div>
       {contextMenu && (
         <div
           className="app-context-menu"

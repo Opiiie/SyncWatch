@@ -2,12 +2,12 @@
 
 ## One-time GitHub setup
 
-1. Create a prerelease tagged `runtime-v1` and attach the file `libmpv-2.dll`.
+1. Create an immutable prerelease tagged `runtime-v1` and attach the file `libmpv-2.dll`.
 2. Keep the runtime asset at `https://github.com/Opiiie/SyncWatch/releases/download/runtime-v1/libmpv-2.dll`.
 3. Add repository secrets named `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 4. Keep an offline backup of both the private updater key and its password. The public key is already stored in `src-tauri/tauri.conf.json`.
 
-The pinned runtime checksum is stored in `scripts/fetch-libmpv.ps1`. When libmpv is replaced, publish a new immutable runtime release and update both its URL and checksum in that script.
+The pinned runtime URL and checksum are stored in both `scripts/fetch-libmpv.ps1` and `src-tauri/src/mpv_runtime.rs`. When libmpv is replaced, publish a new immutable runtime release and update both locations. Application installers and updater artifacts must remain independent from this DLL.
 
 ## Publishing an application update
 

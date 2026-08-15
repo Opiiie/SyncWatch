@@ -1,4 +1,5 @@
 mod discovery;
+mod mpv_runtime;
 mod player;
 mod protocol;
 mod ws_server;
@@ -109,6 +110,7 @@ pub fn run() {
         .manage(server_state)
         .manage(server_info)
         .manage(discovery::DiscoveryController::default())
+        .manage(mpv_runtime::MpvRuntimeManager::default())
         .manage(player::PlayerController::default())
         .invoke_handler(tauri::generate_handler![
             get_ws_server_info,
@@ -117,6 +119,9 @@ pub fn run() {
             stop_room_discovery,
             discover_local_rooms,
             find_external_subtitles,
+            mpv_runtime::ensure_mpv_runtime,
+            mpv_runtime::get_mpv_runtime_status,
+            mpv_runtime::install_mpv_runtime,
             player::player_create_surface,
             player::player_set_surface_bounds,
             player::player_load,

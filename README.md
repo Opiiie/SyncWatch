@@ -13,11 +13,13 @@ pnpm tauri dev
 
 SyncWatch dynamically loads a 64-bit `libmpv-2.dll`. This keeps normal Rust and frontend builds independent from a machine-specific import library.
 
-For development, place the DLL at `src-tauri/resources/libmpv-2.dll`. Tauri includes this file as an application resource in Windows installers, so an installed copy of SyncWatch does not require a separate libmpv installation. A raw development executable can also load the DLL from its adjacent `resources` directory or from an absolute path supplied through `SYNCWATCH_LIBMPV_PATH`.
+For development, place the DLL at `src-tauri/resources/libmpv-2.dll` or provide an absolute path through `SYNCWATCH_LIBMPV_PATH`.
+
+Windows installers and normal application updates do not contain libmpv. Shortly after startup SyncWatch checks the pinned runtime in its local application-data directory. When it is missing, the application first migrates a compatible DLL from an older installation and otherwise downloads it once from the immutable `runtime-v1` GitHub Release. Both downloaded and manually selected files must match the pinned SHA-256 checksum before they are activated. A failed download can be retried from the in-app notice, and an offline user can select a compatible `libmpv-2.dll` manually.
 
 The official mpv installation page links maintained Windows builds: <https://mpv.io/installation/>. Select a development/libmpv archive containing `libmpv-2.dll`; an archive containing only `mpv.exe` is insufficient.
 
-When the DLL is unavailable or incompatible, the player surface displays a diagnostic message while the rest of the room remains usable.
+When the DLL is unavailable or incompatible, the rest of the room remains usable while the runtime notice offers recovery actions. Player creation waits for an already running runtime preparation instead of starting another download.
 
 ## Player controls
 
@@ -59,9 +61,9 @@ Debug builds accept `--allow-multiple-instances`, while normal builds remain sin
 
 ## Updates and releases
 
-Packaged builds check the latest GitHub Release shortly after startup. When an update is available, the user can download and install it from a small in-app notice. Installation is disabled while the user is connected to a room so playback is never interrupted unexpectedly. Update bundles are signed with the Tauri updater key and installed in passive mode on Windows.
+Packaged builds check the latest GitHub Release shortly after startup. When an update is available, the user can download and install it from a small in-app notice. Installation is disabled while the user is connected to a room so playback is never interrupted unexpectedly. Update bundles are signed with the Tauri updater key and installed quietly on Windows; SyncWatch still shows its own download progress before the required restart.
 
-`libmpv-2.dll` is not stored in Git. Local developers and the Windows release workflow restore the pinned DLL from the `runtime-v1` GitHub prerelease by running `scripts/fetch-libmpv.ps1`; the script rejects a download whose SHA-256 checksum does not match. See `RELEASING.md` for the release procedure.
+`libmpv-2.dll` is not stored in Git or application releases. Local developers can restore the pinned DLL from the `runtime-v1` GitHub prerelease by running `scripts/fetch-libmpv.ps1`; the script rejects a download whose SHA-256 checksum does not match. Application releases fetch the same runtime on the user's computer only when needed. See `RELEASING.md` for the release procedure.
 
 ## Playlist
 

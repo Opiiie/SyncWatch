@@ -72,6 +72,17 @@ body {
   min-width: 320px;
 }
 
+.app-notice-stack {
+  bottom: 18px;
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  max-width: calc(100vw - 36px);
+  position: fixed;
+  right: 18px;
+  z-index: 950;
+}
+
 button,
 input,
 select { font-family: inherit; }

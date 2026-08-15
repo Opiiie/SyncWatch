@@ -1,0 +1,18 @@
+.mpv-runtime {
+  grid-template-columns: auto minmax(260px, 1fr) auto auto;
+}
+
+.mpv-runtime .app-update__mark {
+  font-size: 15px;
+}
+
+.app-update.mpv-runtime > button.mpv-runtime__secondary {
+  background: transparent;
+  border: 1px solid rgba(126, 108, 177, .55);
+  color: #d7d1ea;
+}
+
+@media (max-width: 760px) {
+  .mpv-runtime { grid-template-columns: auto minmax(0, 1fr); }
+  .mpv-runtime > button { grid-column: 2; justify-self: start; }
+}

@@ -120,23 +120,26 @@ pub struct PlayerController {
 }
 
 #[tauri::command]
-pub fn player_create_surface(
+pub async fn player_create_surface(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, crate::mpv_runtime::MpvRuntimeManager>,
     window: tauri::WebviewWindow,
     controller: tauri::State<'_, PlayerController>,
     bounds: PlayerBounds,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
+        let runtime_path = runtime.ensure(&app).await?;
         return controller
             .inner
             .lock()
             .map_err(|_| "Контроллер плеера недоступен".to_owned())?
-            .create_surface(&window, bounds);
+            .create_surface(&window, bounds, &runtime_path);
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (window, controller, bounds);
+        let _ = (app, runtime, window, controller, bounds);
         Err("Встраивание libmpv пока реализовано только для Windows".to_owned())
     }
 }
@@ -369,7 +372,6 @@ pub fn player_destroy(controller: tauri::State<'_, PlayerController>) -> Result<
 mod windows_player {
     use std::{
         ffi::{c_char, c_void, CStr, CString},
-        path::PathBuf,
         ptr,
     };
 
@@ -412,46 +414,36 @@ mod windows_player {
     }
 
     impl MpvApi {
-        fn load() -> Result<Self, String> {
-            let candidates = library_candidates();
-            let mut failures = Vec::new();
-            for candidate in candidates {
-                let library = match unsafe { Library::new(&candidate) } {
-                    Ok(library) => library,
-                    Err(error) => {
-                        failures.push(format!("{}: {error}", candidate.display()));
-                        continue;
-                    }
-                };
+        fn load(runtime_path: &std::path::Path) -> Result<Self, String> {
+            let library = unsafe { Library::new(runtime_path) }.map_err(|error| {
+                format!(
+                    "Не удалось открыть подготовленную libmpv ({}): {error}",
+                    runtime_path.display()
+                )
+            })?;
 
-                return unsafe {
-                    Ok(Self {
-                        create: *library.get(b"mpv_create\0").map_err(symbol_error)?,
-                        set_option_string: *library
-                            .get(b"mpv_set_option_string\0")
-                            .map_err(symbol_error)?,
-                        initialize: *library.get(b"mpv_initialize\0").map_err(symbol_error)?,
-                        command: *library.get(b"mpv_command\0").map_err(symbol_error)?,
-                        set_property_string: *library
-                            .get(b"mpv_set_property_string\0")
-                            .map_err(symbol_error)?,
-                        get_property_string: *library
-                            .get(b"mpv_get_property_string\0")
-                            .map_err(symbol_error)?,
-                        free: *library.get(b"mpv_free\0").map_err(symbol_error)?,
-                        terminate_destroy: *library
-                            .get(b"mpv_terminate_destroy\0")
-                            .map_err(symbol_error)?,
-                        error_string: *library.get(b"mpv_error_string\0").map_err(symbol_error)?,
-                        _library: library,
-                    })
-                };
+            unsafe {
+                Ok(Self {
+                    create: *library.get(b"mpv_create\0").map_err(symbol_error)?,
+                    set_option_string: *library
+                        .get(b"mpv_set_option_string\0")
+                        .map_err(symbol_error)?,
+                    initialize: *library.get(b"mpv_initialize\0").map_err(symbol_error)?,
+                    command: *library.get(b"mpv_command\0").map_err(symbol_error)?,
+                    set_property_string: *library
+                        .get(b"mpv_set_property_string\0")
+                        .map_err(symbol_error)?,
+                    get_property_string: *library
+                        .get(b"mpv_get_property_string\0")
+                        .map_err(symbol_error)?,
+                    free: *library.get(b"mpv_free\0").map_err(symbol_error)?,
+                    terminate_destroy: *library
+                        .get(b"mpv_terminate_destroy\0")
+                        .map_err(symbol_error)?,
+                    error_string: *library.get(b"mpv_error_string\0").map_err(symbol_error)?,
+                    _library: library,
+                })
             }
-
-            Err(format!(
-                "libmpv-2.dll не найдена. Поместите 64-битную DLL рядом с syncwatch.exe или задайте SYNCWATCH_LIBMPV_PATH. Проверено: {}",
-                failures.join("; ")
-            ))
         }
 
         fn check(&self, code: i32, operation: &str) -> Result<(), String> {
@@ -474,25 +466,6 @@ mod windows_player {
         format!("Несовместимая библиотека libmpv: {error}")
     }
 
-    fn library_candidates() -> Vec<PathBuf> {
-        let mut candidates = Vec::new();
-        if let Some(path) = std::env::var_os("SYNCWATCH_LIBMPV_PATH") {
-            candidates.push(PathBuf::from(path));
-        }
-        if let Ok(executable) = std::env::current_exe() {
-            if let Some(directory) = executable.parent() {
-                candidates.push(directory.join("libmpv-2.dll"));
-                candidates.push(directory.join("resources/libmpv-2.dll"));
-            }
-        }
-        if let Ok(directory) = std::env::current_dir() {
-            candidates.push(directory.join("src-tauri/resources/libmpv-2.dll"));
-            candidates.push(directory.join("resources/libmpv-2.dll"));
-        }
-        candidates.push(PathBuf::from("libmpv-2.dll"));
-        candidates
-    }
-
     pub struct MpvInstance {
         api: MpvApi,
         handle: *mut c_void,
@@ -502,8 +475,8 @@ mod windows_player {
     unsafe impl Send for MpvInstance {}
 
     impl MpvInstance {
-        fn new(window: HWND) -> Result<Self, String> {
-            let api = MpvApi::load()?;
+        fn new(window: HWND, runtime_path: &std::path::Path) -> Result<Self, String> {
+            let api = MpvApi::load(runtime_path)?;
             let handle = unsafe { (api.create)() };
             if handle.is_null() {
                 return Err("libmpv не смогла создать контекст плеера".to_owned());
@@ -867,16 +840,14 @@ mod windows_player {
             &mut self,
             window: &tauri::WebviewWindow,
             bounds: PlayerBounds,
+            runtime_path: &std::path::Path,
         ) -> Result<(), String> {
             if let Some(surface) = &self.surface {
                 return surface.set_bounds(bounds);
             }
             let host = window.hwnd().map_err(|error| error.to_string())?.0 as HWND;
             let surface = NativeSurface::create(host, bounds)?;
-            let mpv = match MpvInstance::new(surface.window) {
-                Ok(mpv) => mpv,
-                Err(error) => return Err(error),
-            };
+            let mpv = MpvInstance::new(surface.window, runtime_path)?;
             self.surface = Some(surface);
             self.mpv = Some(mpv);
             Ok(())
