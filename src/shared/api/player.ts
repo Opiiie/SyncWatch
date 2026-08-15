@@ -5,6 +5,10 @@ export interface PlayerBounds {
   y: number;
   width: number;
   height: number;
+  clipX: number;
+  clipY: number;
+  clipWidth: number;
+  clipHeight: number;
 }
 
 export interface PlayerTrack {

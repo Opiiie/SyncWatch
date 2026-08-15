@@ -55,8 +55,15 @@ struct Room {
 
 struct RoomMediaSources {
     access_token: String,
-    items: HashMap<String, PathBuf>,
+    items: HashMap<String, MediaFileSource>,
     subtitles: HashMap<String, HashMap<String, PathBuf>>,
+}
+
+#[derive(Clone)]
+struct MediaFileSource {
+    path: PathBuf,
+    size: u64,
+    required_rate_per_viewer: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,19 +111,19 @@ struct Participant {
 const MIN_MEDIA_RATE: u64 = 2_097_152;
 const INITIAL_MEDIA_RATE: u64 = 8_388_608;
 const MAX_MEDIA_RATE: u64 = 67_108_864;
-const UNKNOWN_MEDIA_RATE_PER_VIEWER: u64 = 8_388_608;
-const MEDIA_RATE_SAFETY_NUMERATOR: u64 = 3;
-const MEDIA_RATE_SAFETY_DENOMINATOR: u64 = 2;
-const MEDIA_CHUNK_SIZE: usize = 64 * 1024;
+const UNKNOWN_MEDIA_RATE_PER_VIEWER: u64 = 12_582_912;
+const MEDIA_RATE_SAFETY_NUMERATOR: u64 = 7;
+const MEDIA_RATE_SAFETY_DENOMINATOR: u64 = 4;
+const MEDIA_CHUNK_SIZE: usize = 256 * 1024;
 
 struct MediaTransferProfile {
     bandwidth: Arc<BandwidthGovernor>,
-    duration_seconds: f64,
-    viewer_count: usize,
+    required_rate_per_viewer: Arc<AtomicU64>,
 }
 
 struct BandwidthGovernor {
     bytes_per_second: AtomicU64,
+    viewer_count: AtomicU64,
     next_send: Mutex<Instant>,
 }
 
@@ -124,11 +131,17 @@ impl BandwidthGovernor {
     fn new() -> Self {
         Self {
             bytes_per_second: AtomicU64::new(INITIAL_MEDIA_RATE),
+            viewer_count: AtomicU64::new(0),
             next_send: Mutex::new(Instant::now()),
         }
     }
 
-    async fn pace(&self, bytes: usize, required_rate: u64) {
+    async fn pace(&self, bytes: usize, required_rate_per_viewer: &AtomicU64) {
+        let viewers = self.viewer_count.load(Ordering::Relaxed).max(1);
+        let required_rate = required_rate_per_viewer
+            .load(Ordering::Relaxed)
+            .saturating_mul(viewers)
+            .clamp(MIN_MEDIA_RATE, MAX_MEDIA_RATE);
         let rate = self
             .bytes_per_second
             .load(Ordering::Relaxed)
@@ -146,6 +159,11 @@ impl BandwidthGovernor {
             scheduled
         };
         sleep_until(scheduled).await;
+    }
+
+    fn set_viewer_count(&self, viewer_count: usize) {
+        self.viewer_count
+            .store(viewer_count as u64, Ordering::Relaxed);
     }
 
     fn report_ping(&self, ping_ms: u64, minimum_ping_ms: u64) {
@@ -171,8 +189,7 @@ fn adjusted_media_rate(current: u64, ping_ms: u64, minimum_ping_ms: u64) -> u64 
     adjusted.clamp(MIN_MEDIA_RATE, MAX_MEDIA_RATE)
 }
 
-fn required_media_rate(file_size: u64, duration_seconds: f64, viewer_count: usize) -> u64 {
-    let viewers = viewer_count.max(1) as u64;
+fn required_media_rate_per_viewer(file_size: u64, duration_seconds: f64) -> u64 {
     let per_viewer = if duration_seconds.is_finite() && duration_seconds > 0.0 {
         let average_rate = (file_size as f64 / duration_seconds).ceil() as u64;
         average_rate
@@ -181,9 +198,7 @@ fn required_media_rate(file_size: u64, duration_seconds: f64, viewer_count: usiz
     } else {
         UNKNOWN_MEDIA_RATE_PER_VIEWER
     };
-    per_viewer
-        .saturating_mul(viewers)
-        .clamp(MIN_MEDIA_RATE, MAX_MEDIA_RATE)
+    per_viewer.clamp(MIN_MEDIA_RATE, MAX_MEDIA_RATE)
 }
 
 impl Room {
@@ -258,7 +273,16 @@ impl ServerState {
             if !metadata.is_file() {
                 return Err(format!("Это не видеофайл: {}", source.path));
             }
-            items.insert(item_id.to_owned(), path);
+            items.insert(
+                item_id.to_owned(),
+                MediaFileSource {
+                    path,
+                    size: metadata.len(),
+                    required_rate_per_viewer: Arc::new(AtomicU64::new(
+                        UNKNOWN_MEDIA_RATE_PER_VIEWER,
+                    )),
+                },
+            );
             if source.subtitles.len() > 64 {
                 return Err("К одному видео можно добавить не более 64 файлов субтитров".to_owned());
             }
@@ -296,6 +320,22 @@ impl ServerState {
             },
         );
         Ok(())
+    }
+
+    async fn update_media_rate_hints(&self, room_code: &str, playlist: &[PlaylistItem]) {
+        let sources = self.media_sources.read().await;
+        let Some(room_sources) = sources.get(room_code) else {
+            return;
+        };
+        for item in playlist {
+            let Some(source) = room_sources.items.get(&item.id) else {
+                continue;
+            };
+            source.required_rate_per_viewer.store(
+                required_media_rate_per_viewer(source.size, item.duration_seconds),
+                Ordering::Relaxed,
+            );
+        }
     }
 
     pub async fn discoverable_rooms(&self, room_code: Option<&str>) -> Vec<DiscoverableRoom> {
@@ -443,22 +483,19 @@ async fn stream_media(
     headers: HeaderMap,
 ) -> Response {
     let room_code = room_code.trim().to_uppercase();
-    let transfer = {
+    let bandwidth = {
         let rooms = state.rooms.read().await;
         rooms.get(&room_code).and_then(|room| {
-            let item = room.playlist.iter().find(|item| item.id == item_id)?;
-            (room.media_access_token == query.token).then(|| MediaTransferProfile {
-                bandwidth: room.bandwidth.clone(),
-                duration_seconds: item.duration_seconds,
-                viewer_count: room.participants.len().saturating_sub(1),
-            })
+            (room.media_access_token == query.token
+                && room.playlist.iter().any(|item| item.id == item_id))
+            .then(|| room.bandwidth.clone())
         })
     };
-    let Some(transfer) = transfer else {
+    let Some(bandwidth) = bandwidth else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let path = {
+    let source = {
         let sources = state.media_sources.read().await;
         sources.get(&room_code).and_then(|room| {
             (room.access_token == query.token)
@@ -466,11 +503,15 @@ async fn stream_media(
                 .flatten()
         })
     };
-    let Some(path) = path else {
+    let Some(source) = source else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    stream_file(path, headers, Some(transfer)).await
+    let transfer = MediaTransferProfile {
+        bandwidth,
+        required_rate_per_viewer: source.required_rate_per_viewer,
+    };
+    stream_file(source.path, headers, Some(transfer)).await
 }
 
 async fn stream_subtitle(
@@ -527,10 +568,7 @@ async fn stream_file(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let size = metadata.len();
-    let required_rate = transfer.as_ref().map_or(MIN_MEDIA_RATE, |profile| {
-        required_media_rate(size, profile.duration_seconds, profile.viewer_count)
-    });
-    let bandwidth = transfer.map(|profile| profile.bandwidth);
+    let transfer = transfer.map(|profile| (profile.bandwidth, profile.required_rate_per_viewer));
     let requested_range = match headers.get(header::RANGE) {
         Some(value) => match value
             .to_str()
@@ -552,10 +590,10 @@ async fn stream_file(
 
     let stream =
         ReaderStream::with_capacity(file.take(length), MEDIA_CHUNK_SIZE).then(move |chunk| {
-            let bandwidth = bandwidth.clone();
+            let transfer = transfer.clone();
             async move {
-                if let (Ok(bytes), Some(governor)) = (&chunk, bandwidth) {
-                    governor.pace(bytes.len(), required_rate).await;
+                if let (Ok(bytes), Some((governor, required_rate))) = (&chunk, transfer) {
+                    governor.pace(bytes.len(), &required_rate).await;
                 }
                 chunk
             }
@@ -799,6 +837,7 @@ async fn perform_handshake(
                 events: events.clone(),
             };
             let snapshot = room.snapshot(&room_code);
+            let rate_playlist = room.playlist.clone();
             let mut rooms = state.rooms.write().await;
             if rooms.contains_key(&room_code) {
                 return Err(ServerMessage::error(
@@ -807,6 +846,10 @@ async fn perform_handshake(
                 ));
             }
             rooms.insert(room_code.clone(), room);
+            drop(rooms);
+            state
+                .update_media_rate_hints(&room_code, &rate_playlist)
+                .await;
             Ok(Handshake {
                 room_code,
                 participant_id: payload.participant_id,
@@ -830,6 +873,8 @@ async fn perform_handshake(
                     minimum_ping_ms: None,
                 },
             );
+            room.bandwidth
+                .set_viewer_count(room.participants.len().saturating_sub(1));
             let snapshot = room.snapshot(&room_code);
             let events = room.events.clone();
             let _ = events.send(ServerMessage::ParticipantJoined {
@@ -964,6 +1009,11 @@ async fn handle_client_message(
                     playback: room.playback.clone(),
                 });
             }
+            let rate_playlist = room.playlist.clone();
+            drop(rooms);
+            state
+                .update_media_rate_hints(connected_room_code, &rate_playlist)
+                .await;
             None
         }
         ClientMessage::Ping(payload) => Some(ServerMessage::Pong {
@@ -1120,6 +1170,8 @@ async fn remove_participant(state: &ServerState, room_code: &str, participant_id
 
     room.participants.remove(participant_id);
     let participant_count = room.participants.len();
+    room.bandwidth
+        .set_viewer_count(participant_count.saturating_sub(1));
     let events = room.events.clone();
     if participant_count == 0 {
         rooms.remove(room_code);
@@ -1279,16 +1331,62 @@ mod tests {
     }
 
     #[test]
-    fn media_rate_floor_covers_average_bitrate_and_all_viewers() {
+    fn media_rate_hint_covers_average_bitrate_per_viewer() {
         let ten_megabytes_per_second = 10 * 1024 * 1024;
         let file_size = ten_megabytes_per_second * 7_200;
 
-        assert_eq!(required_media_rate(file_size, 7_200.0, 1), 15 * 1024 * 1024);
-        assert_eq!(required_media_rate(file_size, 7_200.0, 2), 30 * 1024 * 1024);
         assert_eq!(
-            required_media_rate(file_size, 0.0, 1),
+            required_media_rate_per_viewer(file_size, 7_200.0),
+            35 * 1024 * 1024 / 2
+        );
+        assert_eq!(
+            required_media_rate_per_viewer(file_size, 0.0),
             UNKNOWN_MEDIA_RATE_PER_VIEWER
         );
+    }
+
+    #[tokio::test]
+    async fn playlist_duration_updates_an_existing_transfer_hint() {
+        let state = ServerState::new();
+        let token = "test-media-token-123456";
+        let path = std::env::temp_dir().join(format!(
+            "syncwatch-rate-test-{}-{}.bin",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::write(&path, vec![0_u8; 1024]).unwrap();
+        state
+            .set_media_sources(
+                "ABC123",
+                token,
+                vec![MediaSourceInput {
+                    item_id: "movie-1".to_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    subtitles: Vec::new(),
+                }],
+            )
+            .await
+            .unwrap();
+        let hint = state.media_sources.read().await["ABC123"].items["movie-1"]
+            .required_rate_per_viewer
+            .clone();
+        assert_eq!(hint.load(Ordering::Relaxed), UNKNOWN_MEDIA_RATE_PER_VIEWER);
+
+        state
+            .update_media_rate_hints(
+                "ABC123",
+                &[PlaylistItem {
+                    id: "movie-1".to_owned(),
+                    name: "movie.mkv".to_owned(),
+                    progress_seconds: 0.0,
+                    duration_seconds: 120.0,
+                    external_subtitles: Vec::new(),
+                }],
+            )
+            .await;
+
+        assert_eq!(hint.load(Ordering::Relaxed), MIN_MEDIA_RATE);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

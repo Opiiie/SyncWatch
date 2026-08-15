@@ -21,11 +21,46 @@ import type { PlayerSubtitleSource } from "../../../entities/session/model/types
 function surfaceBounds(element: HTMLDivElement): PlayerBounds {
   const rect = element.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
+  let visibleLeft = Math.max(0, rect.left);
+  let visibleTop = Math.max(0, rect.top);
+  let visibleRight = Math.min(document.documentElement.clientWidth, rect.right);
+  let visibleBottom = Math.min(document.documentElement.clientHeight, rect.bottom);
+
+  for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const style = window.getComputedStyle(ancestor);
+    const clipsX = /(auto|scroll|hidden|clip)/.test(style.overflowX);
+    const clipsY = /(auto|scroll|hidden|clip)/.test(style.overflowY);
+    if (!clipsX && !clipsY) continue;
+    const ancestorRect = ancestor.getBoundingClientRect();
+    const clientLeft = ancestorRect.left + ancestor.clientLeft;
+    const clientTop = ancestorRect.top + ancestor.clientTop;
+    if (clipsX) {
+      visibleLeft = Math.max(visibleLeft, clientLeft);
+      visibleRight = Math.min(visibleRight, clientLeft + ancestor.clientWidth);
+    }
+    if (clipsY) {
+      visibleTop = Math.max(visibleTop, clientTop);
+      visibleBottom = Math.min(visibleBottom, clientTop + ancestor.clientHeight);
+    }
+  }
+
+  const left = Math.floor(rect.left * scale);
+  const top = Math.floor(rect.top * scale);
+  const right = Math.ceil(rect.right * scale);
+  const bottom = Math.ceil(rect.bottom * scale);
+  const clipLeft = Math.max(left, Math.ceil(visibleLeft * scale));
+  const clipTop = Math.max(top, Math.ceil(visibleTop * scale));
+  const clipRight = Math.min(right, Math.floor(visibleRight * scale));
+  const clipBottom = Math.min(bottom, Math.floor(visibleBottom * scale));
   return {
-    x: Math.round(rect.left * scale),
-    y: Math.round(rect.top * scale),
-    width: Math.max(1, Math.round(rect.width * scale)),
-    height: Math.max(1, Math.round(rect.height * scale)),
+    x: left,
+    y: top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+    clipX: Math.max(0, clipLeft - left),
+    clipY: Math.max(0, clipTop - top),
+    clipWidth: Math.max(0, clipRight - clipLeft),
+    clipHeight: Math.max(0, clipBottom - clipTop),
   };
 }
 
@@ -77,12 +112,40 @@ export function useNativePlayer(
     let resizeObserver: ResizeObserver | null = null;
     const windowUnlisteners: (() => void)[] = [];
     let frame = 0;
+    let framesRemaining = 0;
+    let pendingBounds: PlayerBounds | null = null;
+    let sendingBounds = false;
+
+    const flushBounds = async () => {
+      if (sendingBounds) return;
+      sendingBounds = true;
+      try {
+        while (active && pendingBounds) {
+          const next = pendingBounds;
+          pendingBounds = null;
+          await setPlayerSurfaceBounds(next);
+        }
+      } finally {
+        sendingBounds = false;
+      }
+    };
+
+    const captureBounds = () => {
+      frame = 0;
+      if (!active) return;
+      pendingBounds = surfaceBounds(surface);
+      void flushBounds().catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : String(reason));
+      });
+      if (framesRemaining > 0) {
+        framesRemaining -= 1;
+        frame = window.requestAnimationFrame(captureBounds);
+      }
+    };
 
     const updateBounds = () => {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        if (active) void setPlayerSurfaceBounds(surfaceBounds(surface));
-      });
+      framesRemaining = 8;
+      if (!frame) frame = window.requestAnimationFrame(captureBounds);
     };
 
     const startTimer = window.setTimeout(() => {
@@ -99,6 +162,8 @@ export function useNativePlayer(
           resizeObserver.observe(surface);
           window.addEventListener("resize", updateBounds);
           window.addEventListener("scroll", updateBounds, true);
+          window.visualViewport?.addEventListener("resize", updateBounds);
+          window.visualViewport?.addEventListener("scroll", updateBounds);
           const appWindow = getCurrentWindow();
           const listeners = await Promise.all([
             appWindow.onMoved(updateBounds),
@@ -123,6 +188,8 @@ export function useNativePlayer(
       resizeObserver?.disconnect();
       window.removeEventListener("resize", updateBounds);
       window.removeEventListener("scroll", updateBounds, true);
+      window.visualViewport?.removeEventListener("resize", updateBounds);
+      window.visualViewport?.removeEventListener("scroll", updateBounds);
       windowUnlisteners.forEach((unlisten) => unlisten());
       setReady(false);
       setLoadedMediaPath(null);

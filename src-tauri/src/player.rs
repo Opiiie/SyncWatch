@@ -7,6 +7,63 @@ pub struct PlayerBounds {
     y: i32,
     width: i32,
     height: i32,
+    clip_x: i32,
+    clip_y: i32,
+    clip_width: i32,
+    clip_height: i32,
+}
+
+impl PlayerBounds {
+    fn visible_clip(self) -> Option<(i32, i32, i32, i32)> {
+        let left = self.clip_x.clamp(0, self.width.max(0));
+        let top = self.clip_y.clamp(0, self.height.max(0));
+        let right = self
+            .clip_x
+            .saturating_add(self.clip_width)
+            .clamp(left, self.width.max(0));
+        let bottom = self
+            .clip_y
+            .saturating_add(self.clip_height)
+            .clamp(top, self.height.max(0));
+        (right > left && bottom > top).then_some((left, top, right, bottom))
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::PlayerBounds;
+
+    #[test]
+    fn visible_clip_is_limited_to_surface() {
+        let bounds = PlayerBounds {
+            x: 10,
+            y: -100,
+            width: 800,
+            height: 450,
+            clip_x: -20,
+            clip_y: 100,
+            clip_width: 900,
+            clip_height: 500,
+        };
+
+        assert_eq!(bounds.visible_clip(), Some((0, 100, 800, 450)));
+    }
+
+    #[test]
+    fn fully_hidden_surface_has_no_clip() {
+        let bounds = PlayerBounds {
+            x: 0,
+            y: 900,
+            width: 800,
+            height: 450,
+            clip_x: 0,
+            clip_y: 0,
+            clip_width: 0,
+            clip_height: 0,
+        };
+
+        assert_eq!(bounds.visible_clip(), None);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,11 +349,11 @@ mod windows_player {
     use libloading::Library;
     use windows_sys::Win32::{
         Foundation::{HWND, POINT},
-        Graphics::Gdi::ClientToScreen,
+        Graphics::Gdi::{ClientToScreen, CreateRectRgn, DeleteObject, SetWindowRgn},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, IsIconic, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-            SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+            SW_HIDE, SW_SHOWNOACTIVATE, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
         },
     };
 
@@ -435,12 +492,12 @@ mod windows_player {
             instance.set_option("idle", "yes")?;
             instance.set_option("hwdec", "auto-safe")?;
             instance.set_option("cache", "auto")?;
-            instance.set_option("cache-secs", "60")?;
-            instance.set_option("demuxer-max-bytes", "256MiB")?;
-            instance.set_option("demuxer-max-back-bytes", "32MiB")?;
-            instance.set_option("demuxer-hysteresis-secs", "10")?;
+            instance.set_option("cache-secs", "90")?;
+            instance.set_option("demuxer-max-bytes", "512MiB")?;
+            instance.set_option("demuxer-max-back-bytes", "64MiB")?;
+            instance.set_option("demuxer-hysteresis-secs", "15")?;
             instance.set_option("cache-pause", "yes")?;
-            instance.set_option("cache-pause-wait", "3")?;
+            instance.set_option("cache-pause-wait", "5")?;
             instance.api.check(
                 unsafe { (instance.api.initialize)(instance.handle) },
                 "инициализация",
@@ -586,8 +643,6 @@ mod windows_player {
     unsafe impl Send for NativeSurface {}
 
     impl NativeSurface {
-        const EDGE_OVERDRAW: i32 = 8;
-
         fn create(host: HWND, bounds: PlayerBounds) -> Result<Self, String> {
             let class_name = "STATIC\0".encode_utf16().collect::<Vec<_>>();
             let title = "SyncWatch video\0".encode_utf16().collect::<Vec<_>>();
@@ -619,6 +674,10 @@ mod windows_player {
         }
 
         fn set_bounds(&self, bounds: PlayerBounds) -> Result<(), String> {
+            let Some((clip_left, clip_top, clip_right, clip_bottom)) = bounds.visible_clip() else {
+                unsafe { ShowWindow(self.window, SW_HIDE) };
+                return Ok(());
+            };
             if unsafe { IsIconic(self.host) } != 0 {
                 unsafe { ShowWindow(self.window, SW_HIDE) };
                 return Ok(());
@@ -638,22 +697,36 @@ mod windows_player {
                 SetWindowPos(
                     self.window,
                     self.host,
-                    origin.x - Self::EDGE_OVERDRAW,
-                    origin.y - Self::EDGE_OVERDRAW,
-                    bounds.width.max(1) + Self::EDGE_OVERDRAW * 2,
-                    bounds.height.max(1) + Self::EDGE_OVERDRAW * 2,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    origin.x,
+                    origin.y,
+                    bounds.width.max(1),
+                    bounds.height.max(1),
+                    SWP_NOACTIVATE,
                 )
             };
             if result == 0 {
-                Err(format!(
+                return Err(format!(
                     "Не удалось изменить размер области видео: {}",
                     std::io::Error::last_os_error()
-                ))
-            } else {
-                unsafe { ShowWindow(self.window, SW_SHOWNOACTIVATE) };
-                Ok(())
+                ));
             }
+
+            let region = unsafe { CreateRectRgn(clip_left, clip_top, clip_right, clip_bottom) };
+            if region.is_null() {
+                return Err(format!(
+                    "Не удалось ограничить область видео: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if unsafe { SetWindowRgn(self.window, region, 1) } == 0 {
+                unsafe { DeleteObject(region) };
+                return Err(format!(
+                    "Не удалось применить границы области видео: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            unsafe { ShowWindow(self.window, SW_SHOWNOACTIVATE) };
+            Ok(())
         }
     }
 
