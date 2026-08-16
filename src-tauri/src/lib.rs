@@ -89,9 +89,20 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 window.with_webview(|webview| unsafe {
-                    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+                    use webview2_com::Microsoft::Web::WebView2::Win32::{
+                        ICoreWebView2Controller2, ICoreWebView2Settings3, COREWEBVIEW2_COLOR,
+                    };
                     use windows::core::Interface;
 
+                    if let Ok(controller) = webview.controller().cast::<ICoreWebView2Controller2>()
+                    {
+                        let _ = controller.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                            R: 0,
+                            G: 0,
+                            B: 0,
+                            A: 0,
+                        });
+                    }
                     if let Ok(core_webview) = webview.controller().CoreWebView2() {
                         if let Ok(settings) = core_webview.Settings() {
                             let _ = settings.SetAreDefaultContextMenusEnabled(false);

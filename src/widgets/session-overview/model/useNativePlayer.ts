@@ -69,6 +69,19 @@ function surfaceBounds(element: HTMLElement): PlayerBounds {
   };
 }
 
+function sameBounds(left: PlayerBounds | null, right: PlayerBounds): boolean {
+  return left !== null
+    && left.x === right.x
+    && left.y === right.y
+    && left.width === right.width
+    && left.height === right.height
+    && left.clipX === right.clipX
+    && left.clipY === right.clipY
+    && left.clipWidth === right.clipWidth
+    && left.clipHeight === right.clipHeight
+    && left.cornerRadius === right.cornerRadius;
+}
+
 function playbackPosition(playback: PlaybackState, clockOffsetMs: number): number {
   if (!playback.playing) return playback.positionSeconds;
   return playback.positionSeconds
@@ -110,8 +123,8 @@ export function useNativePlayer(
     let resizeObserver: ResizeObserver | null = null;
     const windowUnlisteners: (() => void)[] = [];
     let frame = 0;
-    let framesRemaining = 0;
     let pendingBounds: PlayerBounds | null = null;
+    let appliedBounds: PlayerBounds | null = null;
     let sendingBounds = false;
 
     const flushBounds = async () => {
@@ -121,7 +134,9 @@ export function useNativePlayer(
         while (active && pendingBounds) {
           const next = pendingBounds;
           pendingBounds = null;
+          if (sameBounds(appliedBounds, next)) continue;
           await setPlayerSurfaceBounds(next);
+          appliedBounds = next;
         }
       } finally {
         sendingBounds = false;
@@ -131,29 +146,28 @@ export function useNativePlayer(
     const captureBounds = () => {
       frame = 0;
       if (!active) return;
-      pendingBounds = surfaceBounds(surface);
+      const next = surfaceBounds(surface);
+      if (sameBounds(pendingBounds ?? appliedBounds, next)) return;
+      pendingBounds = next;
       void flushBounds().catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : String(reason));
       });
-      if (framesRemaining > 0) {
-        framesRemaining -= 1;
-        frame = window.requestAnimationFrame(captureBounds);
-      }
     };
 
     const updateBounds = () => {
-      framesRemaining = 8;
       if (!frame) frame = window.requestAnimationFrame(captureBounds);
     };
 
     const startTimer = window.setTimeout(() => {
       void (async () => {
         try {
-          await createPlayerSurface(surfaceBounds(surface));
+          const initialBounds = surfaceBounds(surface);
+          await createPlayerSurface(initialBounds);
           if (!active) {
             await destroyPlayer();
             return;
           }
+          appliedBounds = initialBounds;
           resizeObserver = new ResizeObserver(updateBounds);
           resizeObserver.observe(surface);
           window.addEventListener("resize", updateBounds);
@@ -161,11 +175,7 @@ export function useNativePlayer(
           window.visualViewport?.addEventListener("resize", updateBounds);
           window.visualViewport?.addEventListener("scroll", updateBounds);
           const appWindow = getCurrentWindow();
-          const listeners = await Promise.all([
-            appWindow.onMoved(updateBounds),
-            appWindow.onResized(updateBounds),
-            appWindow.onFocusChanged(updateBounds),
-          ]);
+          const listeners = await Promise.all([appWindow.onResized(updateBounds)]);
           if (active) windowUnlisteners.push(...listeners);
           else listeners.forEach((unlisten) => unlisten());
           setSurfaceReady(true);

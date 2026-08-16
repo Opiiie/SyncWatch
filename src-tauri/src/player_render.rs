@@ -14,10 +14,11 @@ use windows::{
     Win32::{
         Foundation::{HWND, POINT, RECT},
         Graphics::{
-            Direct3D11::ID3D11Texture2D,
+            Direct3D11::{ID3D11Device, ID3D11Texture2D},
             DirectComposition::{
                 DCompositionCreateDevice, IDCompositionDevice, IDCompositionRectangleClip,
-                IDCompositionSurface, IDCompositionTarget, IDCompositionVisual,
+                IDCompositionScaleTransform, IDCompositionSurface, IDCompositionTarget,
+                IDCompositionVisual,
             },
             Dxgi::{
                 Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM},
@@ -57,6 +58,8 @@ const MPV_RENDER_PARAM_OPENGL_INIT_PARAMS: i32 = 2;
 const MPV_RENDER_PARAM_OPENGL_FBO: i32 = 3;
 const MPV_RENDER_PARAM_FLIP_Y: i32 = 4;
 const MPV_RENDER_UPDATE_FRAME: u64 = 1;
+const BACKDROP_EXTENT: f32 = 32_768.0;
+const APP_BACKGROUND: [f32; 4] = [16.0 / 255.0, 14.0 / 255.0, 28.0 / 255.0, 1.0];
 
 type EglDisplay = *mut c_void;
 type EglConfig = *mut c_void;
@@ -251,25 +254,43 @@ impl RenderLoop {
 
     fn run(&mut self, receiver: mpsc::Receiver<RenderMessage>) {
         while let Ok(message) = receiver.recv() {
-            match message {
-                RenderMessage::Frame => {
-                    let flags = unsafe { (self.api.update)(self.context) };
-                    if flags & MPV_RENDER_UPDATE_FRAME != 0 {
-                        if let Err(error) = self.render_frame() {
-                            eprintln!("Failed to render video frame: {error}");
-                        }
-                    }
+            let mut latest_bounds = None;
+            let mut frame_requested = false;
+            let mut shutdown = false;
+            {
+                let mut collect = |next| match next {
+                    RenderMessage::Frame => frame_requested = true,
+                    RenderMessage::Bounds(bounds) => latest_bounds = Some(bounds),
+                    RenderMessage::Shutdown => shutdown = true,
+                };
+                collect(message);
+                while let Ok(next) = receiver.try_recv() {
+                    collect(next);
                 }
-                RenderMessage::Bounds(bounds) => match self.layer.set_bounds(bounds) {
-                    Err(error) => eprintln!("Failed to update video geometry: {error}"),
-                    Ok(true) => {
-                        if let Err(error) = self.render_frame() {
-                            eprintln!("Failed to redraw video frame: {error}");
-                        }
+            }
+            if shutdown {
+                break;
+            }
+
+            let surface_resized = match latest_bounds {
+                Some(bounds) => match self.layer.set_bounds(bounds) {
+                    Ok(update) => update.surface_resized,
+                    Err(error) => {
+                        eprintln!("Failed to update video geometry: {error}");
+                        false
                     }
-                    Ok(false) => {}
                 },
-                RenderMessage::Shutdown => break,
+                None => false,
+            };
+            let mpv_has_frame = if frame_requested {
+                (unsafe { (self.api.update)(self.context) } & MPV_RENDER_UPDATE_FRAME) != 0
+            } else {
+                false
+            };
+            if surface_resized || mpv_has_frame {
+                if let Err(error) = self.render_frame() {
+                    eprintln!("Failed to render video frame: {error}");
+                }
             }
         }
     }
@@ -545,10 +566,19 @@ impl Drop for AngleContext {
 struct CompositionLayer {
     device: IDCompositionDevice,
     _target: IDCompositionTarget,
+    _root: IDCompositionVisual,
+    _backdrop_visual: IDCompositionVisual,
+    _backdrop_scale: IDCompositionScaleTransform,
+    _backdrop_surface: IDCompositionSurface,
     visual: IDCompositionVisual,
     clip: IDCompositionRectangleClip,
     surface: IDCompositionSurface,
     bounds: PlayerBounds,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GeometryUpdate {
+    surface_resized: bool,
 }
 
 impl CompositionLayer {
@@ -556,6 +586,12 @@ impl CompositionLayer {
         unsafe {
             let device: IDCompositionDevice = DCompositionCreateDevice(&dxgi).map_err(win_error)?;
             let target = device.CreateTargetForHwnd(host, false).map_err(win_error)?;
+            let root = device.CreateVisual().map_err(win_error)?;
+            let backdrop_visual = device.CreateVisual().map_err(win_error)?;
+            let backdrop_scale = device.CreateScaleTransform().map_err(win_error)?;
+            let backdrop_surface = device
+                .CreateSurface(1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_IGNORE)
+                .map_err(win_error)?;
             let visual = device.CreateVisual().map_err(win_error)?;
             let clip = device.CreateRectangleClip().map_err(win_error)?;
             let surface = device
@@ -566,12 +602,34 @@ impl CompositionLayer {
                     DXGI_ALPHA_MODE_IGNORE,
                 )
                 .map_err(win_error)?;
+            let d3d: ID3D11Device = dxgi.cast().map_err(win_error)?;
+            fill_surface(&d3d, &backdrop_surface, APP_BACKGROUND)?;
+            backdrop_scale
+                .SetScaleX2(BACKDROP_EXTENT)
+                .map_err(win_error)?;
+            backdrop_scale
+                .SetScaleY2(BACKDROP_EXTENT)
+                .map_err(win_error)?;
+            backdrop_visual
+                .SetContent(&backdrop_surface)
+                .map_err(win_error)?;
+            backdrop_visual
+                .SetTransform(&backdrop_scale)
+                .map_err(win_error)?;
             visual.SetContent(&surface).map_err(win_error)?;
             visual.SetClip(&clip).map_err(win_error)?;
-            target.SetRoot(&visual).map_err(win_error)?;
+            root.AddVisual(&backdrop_visual, false, None::<&IDCompositionVisual>)
+                .map_err(win_error)?;
+            root.AddVisual(&visual, true, &backdrop_visual)
+                .map_err(win_error)?;
+            target.SetRoot(&root).map_err(win_error)?;
             let mut layer = Self {
                 device,
                 _target: target,
+                _root: root,
+                _backdrop_visual: backdrop_visual,
+                _backdrop_scale: backdrop_scale,
+                _backdrop_surface: backdrop_surface,
                 visual,
                 clip,
                 surface,
@@ -589,11 +647,13 @@ impl CompositionLayer {
         self.bounds.height.max(1)
     }
 
-    fn set_bounds(&mut self, bounds: PlayerBounds) -> Result<bool, String> {
+    fn set_bounds(&mut self, bounds: PlayerBounds) -> Result<GeometryUpdate, String> {
         if bounds == self.bounds {
-            return Ok(false);
+            return Ok(GeometryUpdate::default());
         }
-        if bounds.width.max(1) != self.width() || bounds.height.max(1) != self.height() {
+        let surface_resized =
+            bounds.width.max(1) != self.width() || bounds.height.max(1) != self.height();
+        if surface_resized {
             self.surface = unsafe {
                 self.device.CreateSurface(
                     bounds.width.max(1) as u32,
@@ -607,7 +667,7 @@ impl CompositionLayer {
         }
         self.bounds = bounds;
         self.apply_geometry(bounds)?;
-        Ok(true)
+        Ok(GeometryUpdate { surface_resized })
     }
 
     fn apply_geometry(&mut self, bounds: PlayerBounds) -> Result<(), String> {
@@ -660,6 +720,37 @@ impl CompositionLayer {
             self.surface.EndDraw().map_err(win_error)?;
             self.device.Commit().map_err(win_error)
         }
+    }
+}
+
+fn fill_surface(
+    device: &ID3D11Device,
+    surface: &IDCompositionSurface,
+    color: [f32; 4],
+) -> Result<(), String> {
+    let rect = RECT {
+        left: 0,
+        top: 0,
+        right: 1,
+        bottom: 1,
+    };
+    let mut offset = POINT::default();
+    let dxgi_surface: IDXGISurface =
+        unsafe { surface.BeginDraw(Some(&rect), &mut offset) }.map_err(win_error)?;
+    let texture = dxgi_surface.cast::<ID3D11Texture2D>().map_err(win_error)?;
+    let mut render_target = None;
+    unsafe {
+        device
+            .CreateRenderTargetView(&texture, None, Some(&mut render_target))
+            .map_err(win_error)?;
+        let context = device.GetImmediateContext().map_err(win_error)?;
+        context.ClearRenderTargetView(
+            render_target
+                .as_ref()
+                .ok_or_else(|| "DirectComposition не создала фон плеера".to_owned())?,
+            &color,
+        );
+        surface.EndDraw().map_err(win_error)
     }
 }
 
