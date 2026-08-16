@@ -921,6 +921,9 @@ async fn handle_client_message(
             }
             let mut rooms = state.rooms.write().await;
             let room = rooms.get_mut(connected_room_code)?;
+            if room.active_playlist_item_id.is_none() || room.playlist.is_empty() {
+                return None;
+            }
             room.playback.position_seconds = payload.position_seconds.max(0.0);
             room.playback.updated_at_ms = now_ms();
             room.playback.revision += 1;
@@ -946,6 +949,9 @@ async fn handle_client_message(
             }
             let mut rooms = state.rooms.write().await;
             let room = rooms.get_mut(connected_room_code)?;
+            if room.active_playlist_item_id.is_none() || room.playlist.is_empty() {
+                return None;
+            }
             room.playback.position_seconds = payload.position_seconds.max(0.0);
             room.playback.playback_rate = payload.playback_rate.clamp(0.25, 3.0);
             room.playback.updated_at_ms = now_ms();
@@ -1694,6 +1700,93 @@ mod tests {
             ServerMessage::PlaybackState { playback, .. }
                 if !playback.playing && playback.position_seconds == 27.5 && playback.revision == 1
         ));
+    }
+
+    #[tokio::test]
+    async fn switching_playlist_items_restores_each_saved_progress() {
+        let state = ServerState::new();
+        let host = perform_handshake(create_message("host"), &state)
+            .await
+            .unwrap();
+        let mut events = host.events.subscribe();
+        let playlist = vec![
+            PlaylistItem {
+                id: "movie-1".to_owned(),
+                name: "movie.mkv".to_owned(),
+                progress_seconds: 41.5,
+                duration_seconds: 100.0,
+                external_subtitles: Vec::new(),
+            },
+            PlaylistItem {
+                id: "movie-2".to_owned(),
+                name: "episode-2.mkv".to_owned(),
+                progress_seconds: 72.25,
+                duration_seconds: 120.0,
+                external_subtitles: Vec::new(),
+            },
+        ];
+
+        for (active, expected_position) in [("movie-2", 72.25), ("movie-1", 41.5)] {
+            handle_client_message(
+                ClientMessage::PlaylistUpdate(PlaylistUpdatePayload {
+                    room_code: host.room_code.clone(),
+                    playlist: playlist.clone(),
+                    active_playlist_item_id: Some(active.to_owned()),
+                }),
+                &host.room_code,
+                &host.participant_id,
+                &state,
+            )
+            .await;
+
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                ServerMessage::PlaylistState { active_playlist_item_id, .. }
+                    if active_playlist_item_id.as_deref() == Some(active)
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                ServerMessage::PlaybackState { playback, .. }
+                    if !playback.playing && playback.position_seconds == expected_position
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_room_ignores_playback_controls() {
+        let state = ServerState::new();
+        let mut message = create_message("host");
+        let ClientMessage::CreateRoom(payload) = &mut message else {
+            unreachable!()
+        };
+        payload.playlist.clear();
+        payload.active_playlist_item_id = None;
+        payload.media_name = "Плейлист пуст".to_owned();
+        let host = perform_handshake(message, &state).await.unwrap();
+        let mut events = host.events.subscribe();
+
+        handle_client_message(
+            ClientMessage::PlaybackCommand(crate::protocol::PlaybackCommandPayload {
+                room_code: host.room_code.clone(),
+                action: PlaybackAction::Play,
+                position_seconds: 15.0,
+            }),
+            &host.room_code,
+            &host.participant_id,
+            &state,
+        )
+        .await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), events.recv())
+                .await
+                .is_err()
+        );
+        let rooms = state.rooms.read().await;
+        let playback = &rooms[&host.room_code].playback;
+        assert!(!playback.playing);
+        assert_eq!(playback.position_seconds, 0.0);
+        assert_eq!(playback.revision, 0);
     }
 
     #[tokio::test]

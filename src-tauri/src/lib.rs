@@ -127,6 +127,7 @@ pub fn run() {
             player::player_create_surface,
             player::player_set_surface_bounds,
             player::player_load,
+            player::player_stop,
             player::player_set_paused,
             player::player_set_volume,
             player::player_seek,

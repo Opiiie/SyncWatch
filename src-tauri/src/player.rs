@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerBounds {
     pub(crate) x: i32,
@@ -149,6 +149,7 @@ pub fn player_set_surface_bounds(
 pub fn player_load(
     controller: tauri::State<'_, PlayerController>,
     path: String,
+    start_position_seconds: f64,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -157,13 +158,32 @@ pub fn player_load(
             .lock()
             .map_err(|_| "Контроллер плеера недоступен".to_owned())?
             .mpv_mut()?
-            .load(&path);
+            .load(&path, start_position_seconds);
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (controller, path);
+        let _ = (controller, path, start_position_seconds);
         Err("Встраивание libmpv пока реализовано только для Windows".to_owned())
+    }
+}
+
+#[tauri::command]
+pub fn player_stop(controller: tauri::State<'_, PlayerController>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return controller
+            .inner
+            .lock()
+            .map_err(|_| "Контроллер плеера недоступен".to_owned())?
+            .mpv_mut()?
+            .command(&["stop"]);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = controller;
+        Ok(())
     }
 }
 
@@ -583,8 +603,9 @@ mod windows_player {
             )
         }
 
-        pub fn load(&self, path: &str) -> Result<(), String> {
-            self.command(&["loadfile", path, "replace"])
+        pub fn load(&self, path: &str, start_position_seconds: f64) -> Result<(), String> {
+            let options = format!("start={:.3}", start_position_seconds.max(0.0));
+            self.command(&["loadfile", path, "replace", "-1", &options])
         }
 
         pub fn add_subtitle(

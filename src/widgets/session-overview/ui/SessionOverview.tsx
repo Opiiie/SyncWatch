@@ -123,7 +123,6 @@ export function SessionOverview({
   onSyncClock,
 }: SessionOverviewProps) {
   const playerRef = useRef<HTMLElement>(null);
-  const surfaceRef = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<number | null>(null);
   const duplicateHighlightTimerRef = useRef<number | null>(null);
   const seekCommitTimerRef = useRef<number | null>(null);
@@ -144,7 +143,7 @@ export function SessionOverview({
   const [controlError, setControlError] = useState<string | null>(null);
   const [duplicateItemIds, setDuplicateItemIds] = useState<Set<string>>(new Set());
   const player = useNativePlayer(
-    surfaceRef,
+    playerRef,
     localMediaPath,
     playback,
     clockOffsetMs,
@@ -154,6 +153,10 @@ export function SessionOverview({
 
   useEffect(() => {
     appliedTrackPreferencesRef.current.clear();
+  }, [localMediaPath]);
+
+  useEffect(() => {
+    if (!localMediaPath) setSettingsOpen(false);
   }, [localMediaPath]);
 
   useEffect(() => {
@@ -288,10 +291,25 @@ export function SessionOverview({
 
   const nativePosition = player.ready ? player.state.positionSeconds : roomPosition;
   const shownPosition = seekPosition ?? nativePosition;
-  const duration = Math.max(player.state.durationSeconds, shownPosition, 0);
+  const activePlaylistItem = session.playlist.find(
+    (item) => item.id === session.activePlaylistItemId,
+  );
+  const hasLoadedActiveMedia = Boolean(
+    localMediaPath
+    && player.ready
+    && player.loadedMediaPath === localMediaPath
+    && player.state.durationSeconds > 0,
+  );
+  const currentProgressPosition = hasLoadedActiveMedia
+    ? shownPosition
+    : activePlaylistItem?.progressSeconds ?? 0;
+  const currentProgressDuration = hasLoadedActiveMedia
+    ? player.state.durationSeconds
+    : activePlaylistItem?.durationSeconds ?? 0;
+  const duration = Math.max(currentProgressDuration, currentProgressPosition, 0);
   progressSnapshotRef.current = {
-    positionSeconds: shownPosition,
-    durationSeconds: player.state.durationSeconds,
+    positionSeconds: currentProgressPosition,
+    durationSeconds: currentProgressDuration,
   };
 
   useEffect(() => {
@@ -329,7 +347,8 @@ export function SessionOverview({
       : `Повторить · ${Math.round(clockLatencyMs)} мс`;
 
   function togglePlayback() {
-    onPlaybackCommand(playback.playing ? "pause" : "play", shownPosition);
+    if (!localMediaPath) return;
+    onPlaybackCommand(playback.playing ? "pause" : "play", currentProgressPosition);
   }
 
   function changeVolume(value: number) {
@@ -350,6 +369,7 @@ export function SessionOverview({
   }
 
   async function toggleFullscreen() {
+    if (!localMediaPath) return;
     try {
       const appWindow = getCurrentWindow();
       await appWindow.setFullscreen(!fullscreen);
@@ -452,6 +472,14 @@ export function SessionOverview({
       "previousPlaylistItem",
       "nextPlaylistItem",
     ].includes(action)) return;
+    if (!localMediaPath && [
+      "togglePlayback",
+      "toggleFullscreen",
+      "seekForward",
+      "seekBackward",
+      "previousPlaylistItem",
+      "nextPlaylistItem",
+    ].includes(action)) return;
     switch (action) {
       case "togglePlayback":
         togglePlayback();
@@ -463,10 +491,10 @@ export function SessionOverview({
         onSyncClock();
         break;
       case "seekForward":
-        onPlaybackCommand("seek", Math.min(duration || Infinity, shownPosition + playbackSettings.seekSeconds));
+        onPlaybackCommand("seek", Math.min(duration || Infinity, currentProgressPosition + playbackSettings.seekSeconds));
         break;
       case "seekBackward":
-        onPlaybackCommand("seek", Math.max(0, shownPosition - playbackSettings.seekSeconds));
+        onPlaybackCommand("seek", Math.max(0, currentProgressPosition - playbackSettings.seekSeconds));
         break;
       case "previousPlaylistItem":
         switchPlaylist(-1);
@@ -487,7 +515,9 @@ export function SessionOverview({
     if (session.role !== "host") return;
     const index = session.playlist.findIndex((item) => item.id === session.activePlaylistItemId);
     const target = session.playlist[index + direction];
-    if (target) onSelectPlaylistItem(target.id, shownPosition, player.state.durationSeconds);
+    if (target) {
+      onSelectPlaylistItem(target.id, currentProgressPosition, currentProgressDuration);
+    }
   }
 
   function handlePlayerPointerDown(event: ReactPointerEvent<HTMLElement>) {
@@ -498,7 +528,7 @@ export function SessionOverview({
 
   async function leaveSession() {
     if (fullscreen) await getCurrentWindow().setFullscreen(false);
-    onLeave(shownPosition, player.state.durationSeconds);
+    onLeave(currentProgressPosition, currentProgressDuration);
   }
 
   async function addVideos() {
@@ -632,7 +662,7 @@ export function SessionOverview({
         }}
         onWheel={showControls}
       >
-        <div ref={surfaceRef} className="native-video-surface">
+        <div className="native-video-surface">
           {playerMessage && (
             <div className={`player__center ${player.error ? "player__center--error" : ""}`}>
               <span className="player__mark">S</span>
@@ -645,7 +675,7 @@ export function SessionOverview({
           <div className="player-control-error" role="alert">{controlError ?? error}</div>
         )}
 
-        {fullscreen && session.playlist.length > 0 && (
+        {fullscreen && localMediaPath && session.playlist.length > 0 && (
           <aside className="fullscreen-playlist player-transient-ui" aria-label="Плейлист">
             <strong>Плейлист</strong>
             <ol>
@@ -658,8 +688,8 @@ export function SessionOverview({
                       disabled={session.role !== "host" || active}
                       onClick={() => onSelectPlaylistItem(
                         item.id,
-                        shownPosition,
-                        player.state.durationSeconds,
+                        currentProgressPosition,
+                        currentProgressDuration,
                       )}
                       title={item.name}
                     >
@@ -673,7 +703,7 @@ export function SessionOverview({
           </aside>
         )}
 
-        <div className="player-settings-wrap player-transient-ui">
+        {localMediaPath && <div className="player-settings-wrap player-transient-ui">
           <button
             className="player-icon-button"
             onClick={() => setSettingsOpen(true)}
@@ -683,7 +713,7 @@ export function SessionOverview({
           >
             ⚙
           </button>
-        </div>
+        </div>}
 
         {settingsOpen && (
           <div className="playback-settings-backdrop" onPointerDown={() => setSettingsOpen(false)}>
@@ -717,7 +747,10 @@ export function SessionOverview({
                 <span>Скорость (для всех)</span>
                 <select
                   value={playback.playbackRate}
-                  onChange={(event) => onPlaybackRate(Number(event.target.value), shownPosition)}
+                  onChange={(event) => onPlaybackRate(
+                    Number(event.target.value),
+                    currentProgressPosition,
+                  )}
                 >
                   {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
                     <option key={speed} value={speed}>{speed}×</option>
@@ -836,7 +869,7 @@ export function SessionOverview({
           </div>
         )}
 
-        <div className="player__controls player-transient-ui">
+        {localMediaPath && <div className="player__controls player-transient-ui">
           <div className="player-progress">
             <input
               aria-label="Позиция воспроизведения"
@@ -844,7 +877,7 @@ export function SessionOverview({
               min="0"
               max={Math.max(duration, 1)}
               step="0.1"
-              value={Math.min(shownPosition, Math.max(duration, 1))}
+              value={Math.min(currentProgressPosition, Math.max(duration, 1))}
               disabled={duration <= 0}
               onChange={(event) => {
                 seekCommittedRef.current = false;
@@ -858,7 +891,7 @@ export function SessionOverview({
               }}
             />
             <div className="player-progress__time">
-              <span>{formatDuration(shownPosition)}</span>
+              <span>{formatDuration(currentProgressPosition)}</span>
               <span>{formatDuration(duration)}</span>
             </div>
           </div>
@@ -914,7 +947,7 @@ export function SessionOverview({
               {fullscreen ? "↙" : "⛶"}
             </button>
           </div>
-        </div>
+        </div>}
       </section>
 
       <section className="playlist-panel" aria-labelledby="playlist-title">
@@ -938,10 +971,10 @@ export function SessionOverview({
             {session.playlist.map((item, index) => {
               const active = item.id === session.activePlaylistItemId;
               const itemDuration = active && session.role === "host"
-                ? player.state.durationSeconds
+                ? currentProgressDuration
                 : item.durationSeconds;
               const itemProgress = active && session.role === "host"
-                ? shownPosition
+                ? currentProgressPosition
                 : item.progressSeconds;
               const progressPercent = itemDuration > 0
                 ? Math.min(100, Math.max(0, itemProgress / itemDuration * 100))
@@ -957,8 +990,8 @@ export function SessionOverview({
                     className="playlist-item__select"
                     onClick={() => session.role === "host" && onSelectPlaylistItem(
                       item.id,
-                      shownPosition,
-                      player.state.durationSeconds,
+                      currentProgressPosition,
+                      currentProgressDuration,
                     )}
                     disabled={session.role !== "host" || active}
                     aria-label={`${active ? "Сейчас воспроизводится" : "Воспроизвести"}: ${item.name}`}

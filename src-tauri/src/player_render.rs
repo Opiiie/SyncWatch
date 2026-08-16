@@ -260,13 +260,15 @@ impl RenderLoop {
                         }
                     }
                 }
-                RenderMessage::Bounds(bounds) => {
-                    if let Err(error) = self.layer.set_bounds(bounds) {
-                        eprintln!("Failed to update video geometry: {error}");
-                    } else if let Err(error) = self.render_frame() {
-                        eprintln!("Failed to redraw video frame: {error}");
+                RenderMessage::Bounds(bounds) => match self.layer.set_bounds(bounds) {
+                    Err(error) => eprintln!("Failed to update video geometry: {error}"),
+                    Ok(true) => {
+                        if let Err(error) = self.render_frame() {
+                            eprintln!("Failed to redraw video frame: {error}");
+                        }
                     }
-                }
+                    Ok(false) => {}
+                },
                 RenderMessage::Shutdown => break,
             }
         }
@@ -587,7 +589,10 @@ impl CompositionLayer {
         self.bounds.height.max(1)
     }
 
-    fn set_bounds(&mut self, bounds: PlayerBounds) -> Result<(), String> {
+    fn set_bounds(&mut self, bounds: PlayerBounds) -> Result<bool, String> {
+        if bounds == self.bounds {
+            return Ok(false);
+        }
         if bounds.width.max(1) != self.width() || bounds.height.max(1) != self.height() {
             self.surface = unsafe {
                 self.device.CreateSurface(
@@ -601,7 +606,8 @@ impl CompositionLayer {
             unsafe { self.visual.SetContent(&self.surface) }.map_err(win_error)?;
         }
         self.bounds = bounds;
-        self.apply_geometry(bounds)
+        self.apply_geometry(bounds)?;
+        Ok(true)
     }
 
     fn apply_geometry(&mut self, bounds: PlayerBounds) -> Result<(), String> {

@@ -13,17 +13,17 @@ import {
   setPlayerSpeed,
   setPlayerSurfaceBounds,
   setPlayerVolume,
+  stopPlayerMedia,
   type PlayerBounds,
   type NativePlayerState,
 } from "../../../shared/api/player";
 import type { PlayerSubtitleSource } from "../../../entities/session/model/types";
 
-function surfaceBounds(element: HTMLDivElement): PlayerBounds {
+function surfaceBounds(element: HTMLElement): PlayerBounds {
   const rect = element.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
-  const radiusSource = element.parentElement ?? element;
   const cornerRadius = Number.parseFloat(
-    window.getComputedStyle(radiusSource).borderTopLeftRadius,
+    window.getComputedStyle(element).borderTopLeftRadius,
   ) || 0;
   let visibleLeft = Math.max(0, rect.left);
   let visibleTop = Math.max(0, rect.top);
@@ -77,7 +77,7 @@ function playbackPosition(playback: PlaybackState, clockOffsetMs: number): numbe
 }
 
 export function useNativePlayer(
-  surfaceRef: RefObject<HTMLDivElement | null>,
+  surfaceRef: RefObject<HTMLElement | null>,
   mediaPath: string | null,
   playback: PlaybackState,
   clockOffsetMs: number,
@@ -85,6 +85,7 @@ export function useNativePlayer(
   externalSubtitles: PlayerSubtitleSource[],
 ) {
   const [ready, setReady] = useState(false);
+  const [surfaceReady, setSurfaceReady] = useState(false);
   const [loadedMediaPath, setLoadedMediaPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [state, setState] = useState<NativePlayerState>({
@@ -96,22 +97,14 @@ export function useNativePlayer(
   });
   const loadedSubtitleIds = useRef(new Set<string>());
   const lastDriftCorrectionRef = useRef(0);
+  const mediaGenerationRef = useRef(0);
 
   useEffect(() => {
     const surface = surfaceRef.current;
-    if (!surface || !mediaPath) return;
+    if (!surface) return;
 
-    setReady(false);
-    setLoadedMediaPath(null);
+    setSurfaceReady(false);
     setError(null);
-    loadedSubtitleIds.current.clear();
-    setState({
-      positionSeconds: 0,
-      durationSeconds: 0,
-      speed: 1,
-      audioTracks: [],
-      subtitleTracks: [],
-    });
 
     let active = true;
     let resizeObserver: ResizeObserver | null = null;
@@ -161,8 +154,6 @@ export function useNativePlayer(
             await destroyPlayer();
             return;
           }
-          await loadPlayerMedia(mediaPath);
-          await setPlayerVolume(volume);
           resizeObserver = new ResizeObserver(updateBounds);
           resizeObserver.observe(surface);
           window.addEventListener("resize", updateBounds);
@@ -177,8 +168,7 @@ export function useNativePlayer(
           ]);
           if (active) windowUnlisteners.push(...listeners);
           else listeners.forEach((unlisten) => unlisten());
-          setReady(true);
-          setLoadedMediaPath(mediaPath);
+          setSurfaceReady(true);
           setError(null);
         } catch (reason) {
           if (active) setError(reason instanceof Error ? reason.message : String(reason));
@@ -196,11 +186,51 @@ export function useNativePlayer(
       window.visualViewport?.removeEventListener("resize", updateBounds);
       window.visualViewport?.removeEventListener("scroll", updateBounds);
       windowUnlisteners.forEach((unlisten) => unlisten());
+      setSurfaceReady(false);
       setReady(false);
       setLoadedMediaPath(null);
       void destroyPlayer();
     };
-  }, [mediaPath, surfaceRef]);
+  }, [surfaceRef]);
+
+  useEffect(() => {
+    const generation = ++mediaGenerationRef.current;
+    loadedSubtitleIds.current.clear();
+    setReady(false);
+    setLoadedMediaPath(null);
+    setError(null);
+    setState({
+      positionSeconds: 0,
+      durationSeconds: 0,
+      speed: 1,
+      audioTracks: [],
+      subtitleTracks: [],
+    });
+    if (!surfaceReady) return;
+
+    let active = true;
+    void (async () => {
+      try {
+        if (!mediaPath) {
+          await stopPlayerMedia();
+          return;
+        }
+        await loadPlayerMedia(mediaPath, playbackPosition(playback, clockOffsetMs));
+        if (!active || mediaGenerationRef.current !== generation) return;
+        setReady(true);
+        setLoadedMediaPath(mediaPath);
+        setError(null);
+      } catch (reason) {
+        if (active && mediaGenerationRef.current === generation) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        }
+      }
+    })();
+    return () => { active = false; };
+  // The initial room position belongs to this media-path transition. Later playback
+  // changes are applied by the synchronization effect below without reloading the file.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaPath, surfaceReady]);
 
   useEffect(() => {
     if (!ready || loadedMediaPath !== mediaPath) return;

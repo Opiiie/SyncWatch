@@ -36,8 +36,12 @@ export function setPlayerSurfaceBounds(bounds: PlayerBounds): Promise<void> {
   return invoke("player_set_surface_bounds", { bounds });
 }
 
-export function loadPlayerMedia(path: string): Promise<void> {
-  return invoke("player_load", { path });
+export function loadPlayerMedia(path: string, startPositionSeconds: number): Promise<void> {
+  return invoke("player_load", { path, startPositionSeconds });
+}
+
+export function stopPlayerMedia(): Promise<void> {
+  return invoke("player_stop");
 }
 
 export function setPlayerPaused(paused: boolean): Promise<void> {

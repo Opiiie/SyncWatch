@@ -592,7 +592,7 @@ export function useSessionController() {
   }, [prepareSocket]);
 
   const sendPlaybackCommand = useCallback((action: PlaybackAction, positionSeconds: number) => {
-    if (!state.session) return;
+    if (!state.session?.activePlaylistItemId || state.session.playlist.length === 0) return;
     socketRef.current?.send({
       type: "playback_command",
       payload: { roomCode: state.session.roomCode, action, positionSeconds },
@@ -600,7 +600,7 @@ export function useSessionController() {
   }, [state.session]);
 
   const sendPlaybackRate = useCallback((playbackRate: number, positionSeconds: number) => {
-    if (!state.session) return;
+    if (!state.session?.activePlaylistItemId || state.session.playlist.length === 0) return;
     socketRef.current?.send({
       type: "playback_rate",
       payload: {
