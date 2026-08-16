@@ -21,6 +21,10 @@ import type { PlayerSubtitleSource } from "../../../entities/session/model/types
 function surfaceBounds(element: HTMLDivElement): PlayerBounds {
   const rect = element.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
+  const radiusSource = element.parentElement ?? element;
+  const cornerRadius = Number.parseFloat(
+    window.getComputedStyle(radiusSource).borderTopLeftRadius,
+  ) || 0;
   let visibleLeft = Math.max(0, rect.left);
   let visibleTop = Math.max(0, rect.top);
   let visibleRight = Math.min(document.documentElement.clientWidth, rect.right);
@@ -61,6 +65,7 @@ function surfaceBounds(element: HTMLDivElement): PlayerBounds {
     clipY: Math.max(0, clipTop - top),
     clipWidth: Math.max(0, clipRight - clipLeft),
     clipHeight: Math.max(0, clipBottom - clipTop),
+    cornerRadius: Math.max(0, Math.round(cornerRadius * scale)),
   };
 }
 

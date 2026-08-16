@@ -1,6 +1,8 @@
 mod discovery;
 mod mpv_runtime;
 mod player;
+#[cfg(windows)]
+mod player_render;
 mod protocol;
 mod ws_server;
 

@@ -32,6 +32,22 @@ jobs:
       - name: Установить зависимости
         run: pnpm install --frozen-lockfile
 
+      - name: Подготовить ANGLE для видеорендера
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP "angle.zip"
+          $directory = Join-Path $env:RUNNER_TEMP "angle"
+          Invoke-WebRequest -UseBasicParsing "https://api.nuget.org/v3-flatcontainer/avalonia.angle.windows.natives/2.1.27548.20260419/avalonia.angle.windows.natives.2.1.27548.20260419.nupkg" -OutFile $package
+          Expand-Archive -LiteralPath $package -DestinationPath $directory
+          $runtime = Join-Path $directory "runtimes/win-x64/native/av_libglesv2.dll"
+          $actualHash = (Get-FileHash -LiteralPath $runtime -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne "53191a77fe783cd757ca7767077c2a64a662e7043777a5b4ab74980d4a0b73e3") {
+            throw "Проверка ANGLE не пройдена: $actualHash"
+          }
+          gh release upload runtime-v1 "$runtime#av_libglesv2.dll" --clobber --repo "${{ github.repository }}"
+
       - name: Собрать и опубликовать обновление
         uses: tauri-apps/tauri-action@v1
         env:

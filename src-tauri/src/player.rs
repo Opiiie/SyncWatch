@@ -3,18 +3,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerBounds {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    clip_x: i32,
-    clip_y: i32,
-    clip_width: i32,
-    clip_height: i32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) clip_x: i32,
+    pub(crate) clip_y: i32,
+    pub(crate) clip_width: i32,
+    pub(crate) clip_height: i32,
+    pub(crate) corner_radius: i32,
 }
 
 impl PlayerBounds {
-    fn visible_clip(self) -> Option<(i32, i32, i32, i32)> {
+    pub(crate) fn visible_clip(self) -> Option<(i32, i32, i32, i32)> {
         let left = self.clip_x.clamp(0, self.width.max(0));
         let top = self.clip_y.clamp(0, self.height.max(0));
         let right = self
@@ -26,17 +27,6 @@ impl PlayerBounds {
             .saturating_add(self.clip_height)
             .clamp(top, self.height.max(0));
         (right > left && bottom > top).then_some((left, top, right, bottom))
-    }
-
-    fn visible_backdrop_clip(self, guard: i32) -> Option<(i32, i32, i32, i32)> {
-        let (left, top, right, bottom) = self.visible_clip()?;
-        let guard = guard.max(0);
-        Some((
-            left + guard - i32::from(left == 0) * guard,
-            top + guard - i32::from(top == 0) * guard,
-            right + guard + i32::from(right == self.width.max(0)) * guard,
-            bottom + guard + i32::from(bottom == self.height.max(0)) * guard,
-        ))
     }
 }
 
@@ -55,6 +45,7 @@ mod bounds_tests {
             clip_y: 100,
             clip_width: 900,
             clip_height: 500,
+            corner_radius: 18,
         };
 
         assert_eq!(bounds.visible_clip(), Some((0, 100, 800, 450)));
@@ -71,25 +62,10 @@ mod bounds_tests {
             clip_y: 0,
             clip_width: 0,
             clip_height: 0,
+            corner_radius: 18,
         };
 
         assert_eq!(bounds.visible_clip(), None);
-    }
-
-    #[test]
-    fn backdrop_covers_visible_edges_but_not_a_scrolled_boundary() {
-        let bounds = PlayerBounds {
-            x: 10,
-            y: -100,
-            width: 800,
-            height: 450,
-            clip_x: 0,
-            clip_y: 100,
-            clip_width: 800,
-            clip_height: 350,
-        };
-
-        assert_eq!(bounds.visible_backdrop_clip(2), Some((0, 102, 804, 454)));
     }
 }
 
@@ -129,12 +105,16 @@ pub async fn player_create_surface(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let runtime_path = runtime.ensure(&app).await?;
-        return controller
+        let runtime_paths = runtime.ensure(&app).await?;
+        let result = controller
             .inner
             .lock()
             .map_err(|_| "Контроллер плеера недоступен".to_owned())?
-            .create_surface(&window, bounds, &runtime_path);
+            .create_surface(&window, bounds, &runtime_paths);
+        if let Err(error) = &result {
+            eprintln!("Failed to create video surface: {error}");
+        }
+        result
     }
 
     #[cfg(not(windows))]
@@ -376,15 +356,7 @@ mod windows_player {
     };
 
     use libloading::Library;
-    use windows_sys::Win32::{
-        Foundation::{HWND, POINT},
-        Graphics::Gdi::{ClientToScreen, CreateRectRgn, DeleteObject, SetWindowRgn},
-        UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, IsIconic, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-            SW_HIDE, SW_SHOWNOACTIVATE, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
-        },
-    };
+    use windows::Win32::Foundation::HWND;
 
     use super::PlayerBounds;
 
@@ -399,6 +371,17 @@ mod windows_player {
     type MpvFree = unsafe extern "C" fn(*mut c_void);
     type MpvTerminateDestroy = unsafe extern "C" fn(*mut c_void);
     type MpvErrorString = unsafe extern "C" fn(i32) -> *const c_char;
+    type MpvRenderContextCreate = unsafe extern "C" fn(
+        *mut *mut c_void,
+        *mut c_void,
+        *mut crate::player_render::MpvRenderParam,
+    ) -> i32;
+    type MpvRenderContextSetUpdateCallback =
+        unsafe extern "C" fn(*mut c_void, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void);
+    type MpvRenderContextUpdate = unsafe extern "C" fn(*mut c_void) -> u64;
+    type MpvRenderContextRender =
+        unsafe extern "C" fn(*mut c_void, *mut crate::player_render::MpvRenderParam) -> i32;
+    type MpvRenderContextVoid = unsafe extern "C" fn(*mut c_void);
 
     struct MpvApi {
         _library: Library,
@@ -411,6 +394,12 @@ mod windows_player {
         free: MpvFree,
         terminate_destroy: MpvTerminateDestroy,
         error_string: MpvErrorString,
+        render_context_create: MpvRenderContextCreate,
+        render_context_set_update_callback: MpvRenderContextSetUpdateCallback,
+        render_context_update: MpvRenderContextUpdate,
+        render_context_render: MpvRenderContextRender,
+        render_context_report_swap: MpvRenderContextVoid,
+        render_context_free: MpvRenderContextVoid,
     }
 
     impl MpvApi {
@@ -441,6 +430,24 @@ mod windows_player {
                         .get(b"mpv_terminate_destroy\0")
                         .map_err(symbol_error)?,
                     error_string: *library.get(b"mpv_error_string\0").map_err(symbol_error)?,
+                    render_context_create: *library
+                        .get(b"mpv_render_context_create\0")
+                        .map_err(symbol_error)?,
+                    render_context_set_update_callback: *library
+                        .get(b"mpv_render_context_set_update_callback\0")
+                        .map_err(symbol_error)?,
+                    render_context_update: *library
+                        .get(b"mpv_render_context_update\0")
+                        .map_err(symbol_error)?,
+                    render_context_render: *library
+                        .get(b"mpv_render_context_render\0")
+                        .map_err(symbol_error)?,
+                    render_context_report_swap: *library
+                        .get(b"mpv_render_context_report_swap\0")
+                        .map_err(symbol_error)?,
+                    render_context_free: *library
+                        .get(b"mpv_render_context_free\0")
+                        .map_err(symbol_error)?,
                     _library: library,
                 })
             }
@@ -469,22 +476,30 @@ mod windows_player {
     pub struct MpvInstance {
         api: MpvApi,
         handle: *mut c_void,
+        renderer: Option<crate::player_render::CompositionRenderer>,
     }
 
     // All access is serialized by PlayerController's mutex.
     unsafe impl Send for MpvInstance {}
 
     impl MpvInstance {
-        fn new(window: HWND, runtime_path: &std::path::Path) -> Result<Self, String> {
-            let api = MpvApi::load(runtime_path)?;
+        fn new(
+            host: HWND,
+            bounds: PlayerBounds,
+            runtime_paths: &crate::mpv_runtime::MpvRuntimePaths,
+        ) -> Result<Self, String> {
+            let api = MpvApi::load(&runtime_paths.mpv)?;
             let handle = unsafe { (api.create)() };
             if handle.is_null() {
                 return Err("libmpv не смогла создать контекст плеера".to_owned());
             }
-            let instance = Self { api, handle };
-            let window_id = (window as usize).to_string();
-            instance.set_option("wid", &window_id)?;
+            let mut instance = Self {
+                api,
+                handle,
+                renderer: None,
+            };
             instance.set_option("osc", "no")?;
+            instance.set_option("vo", "libmpv")?;
             instance.set_option("input-default-bindings", "no")?;
             instance.set_option("input-vo-keyboard", "no")?;
             instance.set_option("sub-auto", "no")?;
@@ -502,8 +517,30 @@ mod windows_player {
                 unsafe { (instance.api.initialize)(instance.handle) },
                 "инициализация",
             )?;
+            let render_api = crate::player_render::MpvRenderApi {
+                create: instance.api.render_context_create,
+                set_update_callback: instance.api.render_context_set_update_callback,
+                update: instance.api.render_context_update,
+                render: instance.api.render_context_render,
+                report_swap: instance.api.render_context_report_swap,
+                free: instance.api.render_context_free,
+            };
+            instance.renderer = Some(crate::player_render::CompositionRenderer::start(
+                host,
+                bounds,
+                &runtime_paths.angle,
+                handle,
+                render_api,
+            )?);
             instance.set_property("pause", "yes")?;
             Ok(instance)
+        }
+
+        fn set_bounds(&self, bounds: PlayerBounds) -> Result<(), String> {
+            self.renderer
+                .as_ref()
+                .ok_or_else(|| "Видеослой не инициализирован".to_owned())?
+                .set_bounds(bounds)
         }
 
         fn set_option(&self, name: &str, value: &str) -> Result<(), String> {
@@ -631,208 +668,14 @@ mod windows_player {
 
     impl Drop for MpvInstance {
         fn drop(&mut self) {
+            self.renderer = None;
             unsafe { (self.api.terminate_destroy)(self.handle) };
-        }
-    }
-
-    struct NativeSurface {
-        window: HWND,
-        backdrop: HWND,
-        host: HWND,
-    }
-
-    unsafe impl Send for NativeSurface {}
-
-    impl NativeSurface {
-        const SEAM_GUARD: i32 = 2;
-
-        fn create(host: HWND, bounds: PlayerBounds) -> Result<Self, String> {
-            let class_name = "STATIC\0".encode_utf16().collect::<Vec<_>>();
-            let title = "SyncWatch video\0".encode_utf16().collect::<Vec<_>>();
-            let backdrop_title = "SyncWatch video backdrop\0"
-                .encode_utf16()
-                .collect::<Vec<_>>();
-            let backdrop = unsafe {
-                CreateWindowExW(
-                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-                    class_name.as_ptr(),
-                    backdrop_title.as_ptr(),
-                    WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | 4,
-                    0,
-                    0,
-                    bounds.width.max(1) + Self::SEAM_GUARD * 2,
-                    bounds.height.max(1) + Self::SEAM_GUARD * 2,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                )
-            };
-            if backdrop.is_null() {
-                return Err(format!(
-                    "Не удалось создать фон области видео: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let window = unsafe {
-                CreateWindowExW(
-                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-                    class_name.as_ptr(),
-                    title.as_ptr(),
-                    WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | 4,
-                    0,
-                    0,
-                    bounds.width.max(1),
-                    bounds.height.max(1),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                )
-            };
-            if window.is_null() {
-                unsafe { DestroyWindow(backdrop) };
-                return Err(format!(
-                    "Не удалось создать область видео: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let surface = Self {
-                window,
-                backdrop,
-                host,
-            };
-            surface.set_bounds(bounds)?;
-            Ok(surface)
-        }
-
-        fn set_bounds(&self, bounds: PlayerBounds) -> Result<(), String> {
-            let Some((clip_left, clip_top, clip_right, clip_bottom)) = bounds.visible_clip() else {
-                unsafe {
-                    ShowWindow(self.window, SW_HIDE);
-                    ShowWindow(self.backdrop, SW_HIDE);
-                }
-                return Ok(());
-            };
-            if unsafe { IsIconic(self.host) } != 0 {
-                unsafe {
-                    ShowWindow(self.window, SW_HIDE);
-                    ShowWindow(self.backdrop, SW_HIDE);
-                }
-                return Ok(());
-            }
-
-            let mut origin = POINT {
-                x: bounds.x,
-                y: bounds.y,
-            };
-            if unsafe { ClientToScreen(self.host, &mut origin) } == 0 {
-                return Err(format!(
-                    "Не удалось определить положение области видео: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let guard = Self::SEAM_GUARD;
-            let backdrop_result = unsafe {
-                SetWindowPos(
-                    self.backdrop,
-                    self.host,
-                    origin.x - guard,
-                    origin.y - guard,
-                    bounds.width.max(1) + guard * 2,
-                    bounds.height.max(1) + guard * 2,
-                    SWP_NOACTIVATE,
-                )
-            };
-            if backdrop_result == 0 {
-                return Err(format!(
-                    "Не удалось изменить размер фона видео: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let result = unsafe {
-                SetWindowPos(
-                    self.window,
-                    self.host,
-                    origin.x,
-                    origin.y,
-                    bounds.width.max(1),
-                    bounds.height.max(1),
-                    SWP_NOACTIVATE,
-                )
-            };
-            if result == 0 {
-                return Err(format!(
-                    "Не удалось изменить размер области видео: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-
-            let (backdrop_left, backdrop_top, backdrop_right, backdrop_bottom) = bounds
-                .visible_backdrop_clip(guard)
-                .expect("visible player bounds must have a backdrop clip");
-            Self::apply_region(
-                self.backdrop,
-                backdrop_left,
-                backdrop_top,
-                backdrop_right,
-                backdrop_bottom,
-                "фона видео",
-            )?;
-            Self::apply_region(
-                self.window,
-                clip_left,
-                clip_top,
-                clip_right,
-                clip_bottom,
-                "области видео",
-            )?;
-            unsafe {
-                ShowWindow(self.backdrop, SW_SHOWNOACTIVATE);
-                ShowWindow(self.window, SW_SHOWNOACTIVATE);
-            }
-            Ok(())
-        }
-
-        fn apply_region(
-            window: HWND,
-            left: i32,
-            top: i32,
-            right: i32,
-            bottom: i32,
-            target: &str,
-        ) -> Result<(), String> {
-            let region = unsafe { CreateRectRgn(left, top, right, bottom) };
-            if region.is_null() {
-                return Err(format!(
-                    "Не удалось ограничить {target}: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            if unsafe { SetWindowRgn(window, region, 1) } == 0 {
-                unsafe { DeleteObject(region) };
-                return Err(format!(
-                    "Не удалось применить границы {target}: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            Ok(())
-        }
-    }
-
-    impl Drop for NativeSurface {
-        fn drop(&mut self) {
-            unsafe {
-                DestroyWindow(self.window);
-                DestroyWindow(self.backdrop);
-            }
         }
     }
 
     #[derive(Default)]
     pub struct PlayerInner {
         pub mpv: Option<MpvInstance>,
-        surface: Option<NativeSurface>,
     }
 
     impl PlayerInner {
@@ -840,22 +683,20 @@ mod windows_player {
             &mut self,
             window: &tauri::WebviewWindow,
             bounds: PlayerBounds,
-            runtime_path: &std::path::Path,
+            runtime_paths: &crate::mpv_runtime::MpvRuntimePaths,
         ) -> Result<(), String> {
-            if let Some(surface) = &self.surface {
-                return surface.set_bounds(bounds);
+            if let Some(mpv) = &self.mpv {
+                return mpv.set_bounds(bounds);
             }
-            let host = window.hwnd().map_err(|error| error.to_string())?.0 as HWND;
-            let surface = NativeSurface::create(host, bounds)?;
-            let mpv = MpvInstance::new(surface.window, runtime_path)?;
-            self.surface = Some(surface);
+            let host = HWND(window.hwnd().map_err(|error| error.to_string())?.0);
+            let mpv = MpvInstance::new(host, bounds, runtime_paths)?;
             self.mpv = Some(mpv);
             Ok(())
         }
 
         pub fn set_bounds(&self, bounds: PlayerBounds) -> Result<(), String> {
-            if let Some(surface) = &self.surface {
-                surface.set_bounds(bounds)?;
+            if let Some(mpv) = &self.mpv {
+                mpv.set_bounds(bounds)?;
             }
             Ok(())
         }
@@ -868,7 +709,6 @@ mod windows_player {
 
         pub fn destroy(&mut self) {
             self.mpv = None;
-            self.surface = None;
         }
     }
 }

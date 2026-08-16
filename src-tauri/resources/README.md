@@ -1,5 +1,5 @@
-# libmpv runtime
+# Video runtime
 
-SyncWatch loads the 64-bit `libmpv-2.dll` dynamically at runtime. The DLL is intentionally excluded from Git history. Run `scripts/fetch-libmpv.ps1` to restore the pinned runtime for development and release builds. You can also set `SYNCWATCH_LIBMPV_PATH` to its absolute path.
+SyncWatch loads the 64-bit `libmpv-2.dll` and ANGLE runtime dynamically. These binaries are intentionally excluded from Git history and application installers. For local development, `libmpv-2.dll` can be placed in this directory; `SYNCWATCH_LIBMPV_PATH` and `SYNCWATCH_ANGLE_PATH` can also point to exact runtime files.
 
-The download is verified against its pinned SHA-256 checksum before it is used. Packaged builds include the DLL automatically, so application users do not need to install it separately.
+Missing components are downloaded from the `runtime-v1` GitHub release and verified against pinned SHA-256 checksums before use. Existing verified files are reused after application updates.

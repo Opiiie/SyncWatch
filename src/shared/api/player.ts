@@ -9,6 +9,7 @@ export interface PlayerBounds {
   clipY: number;
   clipWidth: number;
   clipHeight: number;
+  cornerRadius: number;
 }
 
 export interface PlayerTrack {

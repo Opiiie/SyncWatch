@@ -1,6 +1,6 @@
 # SyncWatch
 
-Desktop application for synchronized video watching over a local network or VPN. The UI uses React and Tauri; local playback uses the libmpv C API.
+Desktop application for synchronized video watching over a local network or VPN. The UI uses React and Tauri; local playback uses the libmpv Render API with a DirectComposition video layer on Windows.
 
 ## Development
 
@@ -13,7 +13,7 @@ pnpm tauri dev
 
 SyncWatch dynamically loads a 64-bit `libmpv-2.dll`. This keeps normal Rust and frontend builds independent from a machine-specific import library.
 
-For development, place the DLL at `src-tauri/resources/libmpv-2.dll` or provide an absolute path through `SYNCWATCH_LIBMPV_PATH`.
+For development, place the DLL at `src-tauri/resources/libmpv-2.dll` or provide an absolute path through `SYNCWATCH_LIBMPV_PATH`. The DirectComposition renderer also needs the pinned ANGLE runtime; a local copy can be selected through `SYNCWATCH_ANGLE_PATH`, otherwise it is downloaded and verified automatically.
 
 Windows installers and normal application updates do not contain libmpv. Shortly after startup SyncWatch checks the pinned runtime in its local application-data directory. When it is missing, the application first migrates a compatible DLL from an older installation and otherwise downloads it once from the immutable `runtime-v1` GitHub Release. Both downloaded and manually selected files must match the pinned SHA-256 checksum before they are activated. A failed download can be retried from the in-app notice, and an offline user can select a compatible `libmpv-2.dll` manually.
 
@@ -35,7 +35,7 @@ When the DLL is unavailable or incompatible, the rest of the room remains usable
 
 The controls fade out after two seconds without pointer or keyboard activity and immediately when the pointer leaves the player.
 
-The native video surface keeps the exact player dimensions. A separate clipped black backdrop sits underneath it to cover Windows/DPI composition seams without stretching or cropping the video, and both native surfaces are hidden or clipped when the player scrolls outside the application viewport.
+libmpv renders through OpenGL ES into an ANGLE-backed D3D11 texture, which DirectComposition places inside the exact React player bounds. The WebView remains above that texture, so the existing React controls stay interactive and translucent over the video. Geometry, viewport clipping and rounded corners are applied by the compositor without a separate player window or oversized pixel margins.
 
 ## Network playback
 
@@ -63,7 +63,7 @@ Debug builds accept `--allow-multiple-instances`, while normal builds remain sin
 
 Packaged builds check the latest GitHub Release shortly after startup. When an update is available, the user can download and install it from a small in-app notice. Installation is disabled while the user is connected to a room so playback is never interrupted unexpectedly. Update bundles are signed with the Tauri updater key and installed quietly on Windows; SyncWatch still shows its own download progress before the required restart.
 
-`libmpv-2.dll` is not stored in Git or application releases. Local developers can restore the pinned DLL from the `runtime-v1` GitHub prerelease by running `scripts/fetch-libmpv.ps1`; the script rejects a download whose SHA-256 checksum does not match. Application releases fetch the same runtime on the user's computer only when needed. See `RELEASING.md` for the release procedure.
+`libmpv-2.dll` and the ANGLE runtime are not stored in Git or application releases. Local developers can restore the pinned libmpv DLL from the `runtime-v1` GitHub prerelease by running `scripts/fetch-libmpv.ps1`; the script rejects a download whose SHA-256 checksum does not match. Application releases fetch missing runtimes on the user's computer only when needed. See `RELEASING.md` for the release procedure.
 
 ## Playlist
 

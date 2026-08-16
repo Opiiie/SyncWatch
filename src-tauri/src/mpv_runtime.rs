@@ -18,6 +18,16 @@ const RUNTIME_FILE_NAME: &str = "libmpv-2.dll";
 const RUNTIME_URL: &str =
     "https://github.com/Opiiie/SyncWatch/releases/download/runtime-v1/libmpv-2.dll";
 const RUNTIME_SHA256: &str = "b7ce1d6145dd86be99b3eb04cd4307d484f22f1b957104c0c437b14999451bd2";
+const ANGLE_FILE_NAME: &str = "av_libglesv2.dll";
+const ANGLE_URL: &str =
+    "https://github.com/Opiiie/SyncWatch/releases/download/runtime-v1/av_libglesv2.dll";
+const ANGLE_SHA256: &str = "53191a77fe783cd757ca7767077c2a64a662e7043777a5b4ab74980d4a0b73e3";
+
+#[derive(Clone, Debug)]
+pub struct MpvRuntimePaths {
+    pub mpv: PathBuf,
+    pub angle: PathBuf,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +78,7 @@ impl MpvRuntimeStatus {
 
 pub struct MpvRuntimeManager {
     operation: Mutex<()>,
-    ready_path: RwLock<Option<PathBuf>>,
+    ready_paths: RwLock<Option<MpvRuntimePaths>>,
     status: RwLock<MpvRuntimeStatus>,
 }
 
@@ -76,7 +86,7 @@ impl Default for MpvRuntimeManager {
     fn default() -> Self {
         Self {
             operation: Mutex::new(()),
-            ready_path: RwLock::new(None),
+            ready_paths: RwLock::new(None),
             status: RwLock::new(MpvRuntimeStatus::checking()),
         }
     }
@@ -87,26 +97,23 @@ impl MpvRuntimeManager {
         self.status.read().await.clone()
     }
 
-    pub async fn ensure(&self, app: &tauri::AppHandle) -> Result<PathBuf, String> {
-        if let Some(path) = self.cached_ready_path().await {
-            return Ok(path);
+    pub async fn ensure(&self, app: &tauri::AppHandle) -> Result<MpvRuntimePaths, String> {
+        if let Some(paths) = self.cached_ready_paths().await {
+            return Ok(paths);
         }
 
         let _operation = self.operation.lock().await;
-        if let Some(path) = self.cached_ready_path().await {
-            return Ok(path);
+        if let Some(paths) = self.cached_ready_paths().await {
+            return Ok(paths);
         }
 
         self.set_status(MpvRuntimeStatus::checking()).await;
         match self.ensure_inner(app).await {
-            Ok(path) => {
-                let size = fs::metadata(&path)
-                    .await
-                    .map(|value| value.len())
-                    .unwrap_or(0);
-                *self.ready_path.write().await = Some(path.clone());
+            Ok(paths) => {
+                let size = runtime_size(&paths).await;
+                *self.ready_paths.write().await = Some(paths.clone());
                 self.set_status(MpvRuntimeStatus::ready(size)).await;
-                Ok(path)
+                Ok(paths)
             }
             Err(message) => {
                 self.set_status(MpvRuntimeStatus::error(message.clone()))
@@ -123,27 +130,25 @@ impl MpvRuntimeManager {
     ) -> Result<PathBuf, String> {
         let _operation = self.operation.lock().await;
         self.set_status(MpvRuntimeStatus::checking()).await;
-        *self.ready_path.write().await = None;
+        *self.ready_paths.write().await = None;
 
         let result = async {
             if !file_matches_runtime(source).await? {
                 return Err("Выбранный файл не соответствует используемой версии libmpv".to_owned());
             }
-            let target = runtime_path(app)?;
-            install_verified_copy(source, &target).await?;
-            Ok(target)
+            let paths = runtime_paths(app)?;
+            install_verified_copy(source, &paths.mpv).await?;
+            ensure_angle_runtime(app, self, &paths.angle).await?;
+            Ok(paths)
         }
         .await;
 
         match result {
-            Ok(path) => {
-                let size = fs::metadata(&path)
-                    .await
-                    .map(|value| value.len())
-                    .unwrap_or(0);
-                *self.ready_path.write().await = Some(path.clone());
+            Ok(paths) => {
+                let size = runtime_size(&paths).await;
+                *self.ready_paths.write().await = Some(paths.clone());
                 self.set_status(MpvRuntimeStatus::ready(size)).await;
-                Ok(path)
+                Ok(paths.mpv)
             }
             Err(message) => {
                 self.set_status(MpvRuntimeStatus::error(message.clone()))
@@ -153,37 +158,62 @@ impl MpvRuntimeManager {
         }
     }
 
-    async fn cached_ready_path(&self) -> Option<PathBuf> {
-        let path = self.ready_path.read().await.clone()?;
-        fs::try_exists(&path).await.unwrap_or(false).then_some(path)
+    async fn cached_ready_paths(&self) -> Option<MpvRuntimePaths> {
+        let paths = self.ready_paths.read().await.clone()?;
+        (fs::try_exists(&paths.mpv).await.unwrap_or(false)
+            && fs::try_exists(&paths.angle).await.unwrap_or(false))
+        .then_some(paths)
     }
 
-    async fn ensure_inner(&self, app: &tauri::AppHandle) -> Result<PathBuf, String> {
-        let target = runtime_path(app)?;
-        if file_matches_runtime(&target).await? {
-            return Ok(target);
-        }
+    async fn ensure_inner(&self, app: &tauri::AppHandle) -> Result<MpvRuntimePaths, String> {
+        let paths = runtime_paths(app)?;
+        if !file_matches_runtime(&paths.mpv).await? {
+            let mut installed = false;
 
-        for candidate in legacy_candidates(app) {
-            if candidate == target || !file_matches_runtime(&candidate).await? {
-                continue;
+            for candidate in legacy_candidates(app) {
+                if candidate == paths.mpv || !file_matches_runtime(&candidate).await? {
+                    continue;
+                }
+                install_verified_copy(&candidate, &paths.mpv).await?;
+                installed = true;
+                break;
             }
-            install_verified_copy(&candidate, &target).await?;
-            return Ok(target);
+
+            if !installed {
+                self.download_runtime(&paths.mpv).await?;
+            }
         }
 
-        self.download_runtime(&target).await?;
-        Ok(target)
+        ensure_angle_runtime(app, self, &paths.angle).await?;
+        Ok(paths)
     }
 
     async fn download_runtime(&self, target: &Path) -> Result<(), String> {
+        self.download_component(
+            target,
+            RUNTIME_FILE_NAME,
+            RUNTIME_URL,
+            RUNTIME_SHA256,
+            "libmpv",
+        )
+        .await
+    }
+
+    async fn download_component(
+        &self,
+        target: &Path,
+        file_name: &str,
+        url: &str,
+        expected_sha256: &str,
+        label: &str,
+    ) -> Result<(), String> {
         let directory = target
             .parent()
-            .ok_or_else(|| "Не удалось определить папку libmpv".to_owned())?;
+            .ok_or_else(|| format!("Не удалось определить папку {label}"))?;
         fs::create_dir_all(directory)
             .await
-            .map_err(|error| format!("Не удалось создать папку libmpv: {error}"))?;
-        let temporary = directory.join(format!("{RUNTIME_FILE_NAME}.download"));
+            .map_err(|error| format!("Не удалось создать папку {label}: {error}"))?;
+        let temporary = directory.join(format!("{file_name}.download"));
         let _ = fs::remove_file(&temporary).await;
 
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -194,11 +224,11 @@ impl MpvRuntimeManager {
             .build()
             .map_err(|error| format!("Не удалось подготовить загрузку libmpv: {error}"))?;
         let response = client
-            .get(RUNTIME_URL)
+            .get(url)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| format!("Не удалось скачать libmpv: {error}"))?;
+            .map_err(|error| format!("Не удалось скачать {label}: {error}"))?;
         let total = response.content_length().unwrap_or(0);
         self.set_status(MpvRuntimeStatus {
             stage: RuntimeStage::Downloading,
@@ -211,15 +241,15 @@ impl MpvRuntimeManager {
         let download_result = async {
             let mut file = fs::File::create(&temporary)
                 .await
-                .map_err(|error| format!("Не удалось сохранить libmpv: {error}"))?;
+                .map_err(|error| format!("Не удалось сохранить {label}: {error}"))?;
             let mut stream = response.bytes_stream();
             let mut digest = Sha256::new();
             let mut downloaded = 0_u64;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|error| format!("Загрузка libmpv прервана: {error}"))?;
+                let chunk = chunk.map_err(|error| format!("Загрузка {label} прервана: {error}"))?;
                 file.write_all(&chunk)
                     .await
-                    .map_err(|error| format!("Не удалось сохранить libmpv: {error}"))?;
+                    .map_err(|error| format!("Не удалось сохранить {label}: {error}"))?;
                 digest.update(&chunk);
                 downloaded = downloaded.saturating_add(chunk.len() as u64);
                 self.set_status(MpvRuntimeStatus {
@@ -232,12 +262,12 @@ impl MpvRuntimeManager {
             }
             file.flush()
                 .await
-                .map_err(|error| format!("Не удалось завершить сохранение libmpv: {error}"))?;
+                .map_err(|error| format!("Не удалось завершить сохранение {label}: {error}"))?;
             drop(file);
-            if digest_hex(digest.finalize().as_slice()) != RUNTIME_SHA256 {
-                return Err("Проверка загруженной libmpv не пройдена".to_owned());
+            if digest_hex(digest.finalize().as_slice()) != expected_sha256 {
+                return Err(format!("Проверка загруженной {label} не пройдена"));
             }
-            activate_temporary_file(&temporary, target).await
+            activate_temporary_file(&temporary, target, label).await
         }
         .await;
 
@@ -252,16 +282,63 @@ impl MpvRuntimeManager {
     }
 }
 
-fn runtime_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn runtime_paths(app: &tauri::AppHandle) -> Result<MpvRuntimePaths, String> {
     app.path()
         .app_local_data_dir()
         .map(|directory| {
-            directory
-                .join("runtime")
-                .join(RUNTIME_VERSION)
-                .join(RUNTIME_FILE_NAME)
+            let directory = directory.join("runtime").join(RUNTIME_VERSION);
+            MpvRuntimePaths {
+                mpv: directory.join(RUNTIME_FILE_NAME),
+                angle: directory.join(ANGLE_FILE_NAME),
+            }
         })
         .map_err(|error| format!("Не удалось определить папку данных приложения: {error}"))
+}
+
+async fn runtime_size(paths: &MpvRuntimePaths) -> u64 {
+    let mpv = fs::metadata(&paths.mpv)
+        .await
+        .map(|value| value.len())
+        .unwrap_or(0);
+    let angle = fs::metadata(&paths.angle)
+        .await
+        .map(|value| value.len())
+        .unwrap_or(0);
+    mpv.saturating_add(angle)
+}
+
+async fn ensure_angle_runtime(
+    app: &tauri::AppHandle,
+    manager: &MpvRuntimeManager,
+    target: &Path,
+) -> Result<(), String> {
+    if file_matches(target, ANGLE_SHA256, "ANGLE").await? {
+        return Ok(());
+    }
+    if let Some(source) = angle_candidates(app)
+        .into_iter()
+        .find(|path| std::fs::exists(path).unwrap_or(false))
+    {
+        if file_matches(&source, ANGLE_SHA256, "ANGLE").await? {
+            install_verified_component(&source, target, ANGLE_SHA256, ANGLE_FILE_NAME, "ANGLE")
+                .await?;
+            return Ok(());
+        }
+    }
+    manager
+        .download_component(target, ANGLE_FILE_NAME, ANGLE_URL, ANGLE_SHA256, "ANGLE")
+        .await
+}
+
+fn angle_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("SYNCWATCH_ANGLE_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(directory) = app.path().resource_dir() {
+        candidates.push(directory.join(ANGLE_FILE_NAME));
+    }
+    candidates
 }
 
 fn legacy_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
@@ -291,40 +368,58 @@ fn legacy_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
 }
 
 async fn install_verified_copy(source: &Path, target: &Path) -> Result<(), String> {
+    install_verified_component(source, target, RUNTIME_SHA256, RUNTIME_FILE_NAME, "libmpv").await
+}
+
+async fn install_verified_component(
+    source: &Path,
+    target: &Path,
+    expected_sha256: &str,
+    file_name: &str,
+    label: &str,
+) -> Result<(), String> {
     let directory = target
         .parent()
-        .ok_or_else(|| "Не удалось определить папку libmpv".to_owned())?;
+        .ok_or_else(|| format!("Не удалось определить папку {label}"))?;
     fs::create_dir_all(directory)
         .await
-        .map_err(|error| format!("Не удалось создать папку libmpv: {error}"))?;
-    let temporary = directory.join(format!("{RUNTIME_FILE_NAME}.copy"));
+        .map_err(|error| format!("Не удалось создать папку {label}: {error}"))?;
+    let temporary = directory.join(format!("{file_name}.copy"));
     let _ = fs::remove_file(&temporary).await;
     fs::copy(source, &temporary)
         .await
-        .map_err(|error| format!("Не удалось скопировать libmpv: {error}"))?;
-    if !file_matches_runtime(&temporary).await? {
+        .map_err(|error| format!("Не удалось скопировать {label}: {error}"))?;
+    if !file_matches(&temporary, expected_sha256, label).await? {
         let _ = fs::remove_file(&temporary).await;
-        return Err("Проверка скопированной libmpv не пройдена".to_owned());
+        return Err(format!("Проверка скопированной {label} не пройдена"));
     }
-    activate_temporary_file(&temporary, target).await
+    activate_temporary_file(&temporary, target, label).await
 }
 
-async fn activate_temporary_file(temporary: &Path, target: &Path) -> Result<(), String> {
+async fn activate_temporary_file(
+    temporary: &Path,
+    target: &Path,
+    label: &str,
+) -> Result<(), String> {
     if fs::try_exists(target).await.unwrap_or(false) {
         fs::remove_file(target)
             .await
-            .map_err(|error| format!("Не удалось заменить libmpv: {error}"))?;
+            .map_err(|error| format!("Не удалось заменить {label}: {error}"))?;
     }
     fs::rename(temporary, target)
         .await
-        .map_err(|error| format!("Не удалось активировать libmpv: {error}"))
+        .map_err(|error| format!("Не удалось активировать {label}: {error}"))
 }
 
 async fn file_matches_runtime(path: &Path) -> Result<bool, String> {
+    file_matches(path, RUNTIME_SHA256, "libmpv").await
+}
+
+async fn file_matches(path: &Path, expected_sha256: &str, label: &str) -> Result<bool, String> {
     let mut file = match fs::File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("Не удалось проверить libmpv: {error}")),
+        Err(error) => return Err(format!("Не удалось проверить {label}: {error}")),
     };
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
@@ -332,13 +427,13 @@ async fn file_matches_runtime(path: &Path) -> Result<bool, String> {
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(|error| format!("Не удалось проверить libmpv: {error}"))?;
+            .map_err(|error| format!("Не удалось проверить {label}: {error}"))?;
         if read == 0 {
             break;
         }
         digest.update(&buffer[..read]);
     }
-    Ok(digest_hex(digest.finalize().as_slice()) == RUNTIME_SHA256)
+    Ok(digest_hex(digest.finalize().as_slice()) == expected_sha256)
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
